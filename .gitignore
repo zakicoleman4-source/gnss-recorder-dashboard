@@ -69,6 +69,10 @@ _tmp_*/
 # ── Converter / binary tools (distribute separately) ─────────────────────────
 tools/
 
+# ── Offline installer wheel caches (large binaries — distribute separately) ───
+offline_installer/wheelhouse/
+offline_installer/wheelhouse_*/
+
 # ── Receiver config (site-specific, use receivers_template.csv instead) ───────
 receivers.csv
 
