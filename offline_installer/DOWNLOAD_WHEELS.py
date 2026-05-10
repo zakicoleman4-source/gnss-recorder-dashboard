@@ -63,7 +63,7 @@ def main() -> int:
     args = ap.parse_args()
 
     here = Path(__file__).resolve().parent
-    req = here / "requirements_offline.txt"
+    req = here.parent / "requirements.txt"  # single source of truth
     if not req.exists():
         print(f"Missing: {req}", file=sys.stderr)
         return 1

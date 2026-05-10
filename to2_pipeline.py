@@ -200,10 +200,11 @@ def _file_sig(p: Path) -> tuple[int, int]:
 
 
 def _db_connect(db_path: Path) -> sqlite3.Connection:
-    conn = sqlite3.connect(str(db_path))
+    conn = sqlite3.connect(str(db_path), timeout=30)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL;")
     conn.execute("PRAGMA synchronous=NORMAL;")
+    conn.execute("PRAGMA busy_timeout=30000;")
     return conn
 
 
@@ -329,40 +330,46 @@ def _parse_rinex_position_xyz(line: str) -> Optional[tuple[float, float, float]]
 
 
 def _ecef_to_llh_wgs84(x: float, y: float, z: float) -> tuple[float, float, float]:
-    # Minimal WGS84 conversion (same logic as scan_gnss_folder.py)
     import math
 
-    # Guard against degenerate ECEF inputs (can appear in some RINEX headers)
-    # that would otherwise cause division-by-zero in the iteration.
     if not all(map(math.isfinite, [x, y, z])):
         return 0.0, 0.0, 0.0
     if x == 0.0 and y == 0.0 and z == 0.0:
         return 0.0, 0.0, 0.0
 
-    a = 6378137.0
-    f = 1.0 / 298.257223563
-    e2 = f * (2.0 - f)
+    a = 6_378_137.0           # WGS84 semi-major axis (m)
+    f = 1.0 / 298.257_223_563  # flattening
+    e2 = f * (2.0 - f)        # first eccentricity squared
+    b = a * (1.0 - f)         # semi-minor axis
 
     lon = math.atan2(y, x)
-    p = math.sqrt(x * x + y * y)
-    if p == 0.0:
-        # At the poles; define lon=0 by convention
-        lat = math.pi / 2.0 if z >= 0 else -math.pi / 2.0
-        return math.degrees(lat), 0.0, abs(z) - a
+    p = math.hypot(x, y)
 
+    # Polar singularity: point is on or very near the z-axis.
+    if p < 1.0:
+        sign = 1.0 if z >= 0.0 else -1.0
+        return sign * 90.0, math.degrees(lon), abs(z) - b
+
+    # Bowring iterative method — converges in 3–4 iterations for any lat/height.
+    # Starting approximation: geocentric latitude reduced by e².
     lat = math.atan2(z, p * (1.0 - e2))
-    for _ in range(7):
+    for _ in range(10):
         sin_lat = math.sin(lat)
         n = a / math.sqrt(1.0 - e2 * sin_lat * sin_lat)
-        h = p / math.cos(lat) - n
-        denom = n + h
-        if denom == 0.0:
-            # Bad/degenerate solution; bail out with a stable fallback
+        lat_new = math.atan2(z + e2 * n * sin_lat, p)
+        if abs(lat_new - lat) < 1e-12:
+            lat = lat_new
             break
-        lat = math.atan2(z, p * (1.0 - e2 * (n / denom)))
+        lat = lat_new
+
     sin_lat = math.sin(lat)
+    cos_lat = math.cos(lat)
     n = a / math.sqrt(1.0 - e2 * sin_lat * sin_lat)
-    h = p / math.cos(lat) - n
+    # Dual formula: equatorial branch avoids /0 near poles; polar branch near equator.
+    if abs(cos_lat) >= abs(sin_lat):
+        h = p / cos_lat - n
+    else:
+        h = z / sin_lat - n * (1.0 - e2)
     return math.degrees(lat), math.degrees(lon), h
 
 

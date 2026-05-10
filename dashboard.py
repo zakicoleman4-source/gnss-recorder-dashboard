@@ -606,7 +606,7 @@ def _manifest_to_sqlite(df: pd.DataFrame, out_path: Path) -> None:
     ]
     out = df[cols].copy()
 
-    conn = sqlite3.connect(str(out_path))
+    conn = sqlite3.connect(str(out_path), timeout=30)
     try:
         out.to_sql("files", conn, if_exists="replace", index=False)
         conn.execute("CREATE INDEX IF NOT EXISTS idx_files_station_hour ON files(station, event_hour_utc)")

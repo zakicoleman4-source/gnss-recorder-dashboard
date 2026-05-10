@@ -15,39 +15,46 @@ def ok(msg: str) -> None:
     print(f"[OK] {msg}")
 
 
-# Pinned versions we ship with -- if the client somehow has a different
-# version installed (manual pip install, system Python instead of the
-# bundled venv, etc.), the dashboard's behaviour is undefined. Catch it here
-# rather than at runtime.
-_EXPECTED_VERSIONS = {
-    "pandas": "2.2.3",
-    "numpy": "1.26.4",
-    "plotly": "5.24.1",
-    "streamlit": "1.39.0",
-    "requests": "2.32.3",
+# Minimum versions required for the dashboard to function correctly.
+# These match requirements.txt — bump here whenever requirements.txt changes.
+_MIN_VERSIONS: dict[str, tuple[int, ...]] = {
+    "pandas":    (2, 2, 0),
+    "numpy":     (1, 26, 0),
+    "plotly":    (5, 20, 0),
+    "streamlit": (1, 36, 0),
+    "requests":  (2, 31, 0),
 }
+
+
+def _parse_version(v: str) -> tuple[int, ...]:
+    parts = []
+    for seg in v.split(".")[:3]:
+        try:
+            parts.append(int("".join(c for c in seg if c.isdigit()) or "0"))
+        except Exception:
+            parts.append(0)
+    return tuple(parts)
 
 
 def _check_versions() -> None:
     import importlib
-    skewed: list[str] = []
-    for pkg, want in _EXPECTED_VERSIONS.items():
+    problems: list[str] = []
+    for pkg, min_ver in _MIN_VERSIONS.items():
         try:
             mod = importlib.import_module(pkg)
-            got = getattr(mod, "__version__", "?")
+            got_str = getattr(mod, "__version__", "0")
+            got = _parse_version(got_str)
         except Exception as e:
-            skewed.append(f"{pkg}: import failed ({e})")
+            problems.append(f"{pkg}: import failed ({e})")
             continue
-        if got != want:
-            skewed.append(f"{pkg}: have {got}, expected {want}")
-    if skewed:
-        # WARN, don't die. Major version skew often still works; we surface it
-        # so the operator knows what to investigate first if the dashboard
-        # misbehaves.
-        for line in skewed:
-            print(f"[WARN] version skew -> {line}")
+        if got < min_ver:
+            min_str = ".".join(str(v) for v in min_ver)
+            problems.append(f"{pkg}: have {got_str}, need >={min_str}")
+    if problems:
+        for line in problems:
+            print(f"[WARN] version check -> {line}")
     else:
-        ok(f"Pinned versions match ({len(_EXPECTED_VERSIONS)} packages)")
+        ok(f"Minimum version requirements met ({len(_MIN_VERSIONS)} packages)")
 
 
 def main() -> int:

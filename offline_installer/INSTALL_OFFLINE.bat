@@ -6,20 +6,25 @@ REM Installs deps from offline_installer\wheelhouse (no internet).
 
 set HERE=%~dp0
 set ROOT=%HERE%..\..
+set PROJECT=%HERE%..
 set VENV=%ROOT%\.venv_offline
 set WHEELHOUSE=%HERE%wheelhouse
-set REQ=%HERE%requirements_offline.txt
+set REQ=%PROJECT%\requirements.txt
 set LOG=%HERE%install_offline.log
 
 echo [gnss] Writing log to: %LOG%
 echo. > "%LOG%"
 
 echo [gnss] Root: %ROOT%
+echo [gnss] Project: %PROJECT%
 echo [gnss] Venv: %VENV%
 echo [gnss] Wheelhouse: %WHEELHOUSE%
+echo [gnss] Requirements: %REQ%
 echo [gnss] Root: %ROOT%>>"%LOG%"
+echo [gnss] Project: %PROJECT%>>"%LOG%"
 echo [gnss] Venv: %VENV%>>"%LOG%"
 echo [gnss] Wheelhouse: %WHEELHOUSE%>>"%LOG%"
+echo [gnss] Requirements: %REQ%>>"%LOG%"
 
 REM Detect python and abort with a CLEAR message if it's missing / is the
 REM Microsoft Store stub. Previously a missing python silently produced an

@@ -1,5 +1,8 @@
+# Dashboard-only dependencies (no server stack).
+# Used by setup_env.ps1 for local development installs.
+# For the full stack (FastAPI server etc.) use requirements.txt instead.
 pandas>=2.2.0
+numpy>=1.26.0
 plotly>=5.20.0
 streamlit>=1.36.0
 requests>=2.31.0
-numpy>=1.26.0

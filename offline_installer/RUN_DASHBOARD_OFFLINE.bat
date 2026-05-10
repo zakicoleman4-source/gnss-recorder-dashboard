@@ -36,10 +36,10 @@ if exist "%ROOT%\gnss-recorder-dashboard\tools\teqc\teqc.exe" (
   set "GNSS_TEQC=%ROOT%\gnss-recorder-dashboard\tools\teqc\teqc.exe"
 )
 
-REM Same for runpkr00 -- the dashboard auto-detects, but exporting here makes
-REM debugging easier (env var shows up in the dashboard's debug log).
+REM Same for runpkr00 -- the dashboard reads GNSS_RUNPKR00 to pre-fill the
+REM tool path in the UI, saving the operator from typing it manually.
 if exist "%ROOT%\gnss-recorder-dashboard\tools\runpkr00\runpkr00.exe" (
-  set "RUNPKR00_PATH=%ROOT%\gnss-recorder-dashboard\tools\runpkr00\runpkr00.exe"
+  set "GNSS_RUNPKR00=%ROOT%\gnss-recorder-dashboard\tools\runpkr00\runpkr00.exe"
 )
 
 REM Make local modules importable regardless of working directory.

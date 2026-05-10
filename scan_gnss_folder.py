@@ -268,14 +268,7 @@ def _parse_approx_position_xyz(lines: List[str]) -> Tuple[Optional[float], Optio
 
 
 def _ecef_to_llh_wgs84(x: float, y: float, z: float) -> Tuple[float, float, float]:
-    """
-    Convert ECEF (m) to geodetic lat/lon (deg) and height (m) on WGS84.
-
-    Hardened against degenerate ECEF triples that show up in real-world RINEX
-    headers (all-zero, NaN/Inf, or values at the poles where p == 0). This is
-    the same ZeroDivisionError class that crashed a client scan, so we mirror
-    the to2_pipeline.py fix exactly.
-    """
+    """Convert ECEF (m) to geodetic lat/lon (deg) and ellipsoidal height (m) on WGS84."""
     import math
 
     if not all(map(math.isfinite, [x, y, z])):
@@ -283,35 +276,38 @@ def _ecef_to_llh_wgs84(x: float, y: float, z: float) -> Tuple[float, float, floa
     if x == 0.0 and y == 0.0 and z == 0.0:
         return 0.0, 0.0, 0.0
 
-    a = 6378137.0
-    f = 1.0 / 298.257223563
-    e2 = f * (2.0 - f)
+    a = 6_378_137.0           # WGS84 semi-major axis (m)
+    f = 1.0 / 298.257_223_563  # flattening
+    e2 = f * (2.0 - f)        # first eccentricity squared
+    b = a * (1.0 - f)         # semi-minor axis
 
     lon = math.atan2(y, x)
     p = math.hypot(x, y)
-    if p == 0.0:
-        # On the polar axis; lat = +/- 90 by convention.
-        lat = math.pi / 2.0 if z >= 0 else -math.pi / 2.0
-        return math.degrees(lat), 0.0, abs(z) - a
 
+    # Polar singularity: on or very near the z-axis.
+    if p < 1.0:
+        sign = 1.0 if z >= 0.0 else -1.0
+        return sign * 90.0, math.degrees(lon), abs(z) - b
+
+    # Bowring iterative method.
     lat = math.atan2(z, p * (1.0 - e2))
-    for _ in range(7):
+    for _ in range(10):
         sin_lat = math.sin(lat)
-        N = a / math.sqrt(1.0 - e2 * sin_lat * sin_lat)
-        cos_lat = math.cos(lat)
-        if cos_lat == 0.0:
+        n = a / math.sqrt(1.0 - e2 * sin_lat * sin_lat)
+        lat_new = math.atan2(z + e2 * n * sin_lat, p)
+        if abs(lat_new - lat) < 1e-12:
+            lat = lat_new
             break
-        h = p / cos_lat - N
-        denom = N + h
-        if denom == 0.0:
-            break
-        lat = math.atan2(z, p * (1.0 - e2 * (N / denom)))
+        lat = lat_new
+
     sin_lat = math.sin(lat)
-    N = a / math.sqrt(1.0 - e2 * sin_lat * sin_lat)
     cos_lat = math.cos(lat)
-    if cos_lat == 0.0:
-        return math.degrees(lat), math.degrees(lon), 0.0
-    h = p / cos_lat - N
+    n = a / math.sqrt(1.0 - e2 * sin_lat * sin_lat)
+    # Dual formula: avoids division-by-zero at both equator and poles.
+    if abs(cos_lat) >= abs(sin_lat):
+        h = p / cos_lat - n
+    else:
+        h = z / sin_lat - n * (1.0 - e2)
     return math.degrees(lat), math.degrees(lon), h
 
 
