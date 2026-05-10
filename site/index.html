@@ -1,0 +1,406 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>GNSS Recorder Dashboard</title>
+    <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
+    <style>
+      :root {
+        --bg: #0f1115;
+        --panel: #151923;
+        --text: #e6e6e6;
+        --muted: #a6adbb;
+        --accent: #00b894;
+        --danger: #ff7675;
+        --border: #2a3242;
+      }
+      body {
+        margin: 0;
+        font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial;
+        background: var(--bg);
+        color: var(--text);
+      }
+      .wrap {
+        max-width: 1200px;
+        margin: 0 auto;
+        padding: 20px;
+      }
+      .topbar {
+        display: flex;
+        align-items: baseline;
+        justify-content: space-between;
+        gap: 16px;
+        flex-wrap: wrap;
+      }
+      .title {
+        font-size: 22px;
+        font-weight: 650;
+        letter-spacing: 0.2px;
+      }
+      .meta {
+        font-size: 13px;
+        color: var(--muted);
+      }
+      .panel {
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        padding: 14px;
+      }
+      .controls {
+        display: grid;
+        grid-template-columns: 2fr 1fr 1fr 1fr;
+        gap: 10px;
+        align-items: end;
+      }
+      label {
+        display: block;
+        font-size: 12px;
+        color: var(--muted);
+        margin-bottom: 6px;
+      }
+      select, input {
+        width: 100%;
+        padding: 10px 10px;
+        border-radius: 10px;
+        border: 1px solid var(--border);
+        background: #0e1220;
+        color: var(--text);
+        outline: none;
+      }
+      button {
+        width: 100%;
+        padding: 10px 10px;
+        border-radius: 10px;
+        border: 1px solid var(--border);
+        background: #0e1220;
+        color: var(--text);
+        cursor: pointer;
+      }
+      button:hover {
+        border-color: #3a4866;
+      }
+      .grid {
+        display: grid;
+        grid-template-columns: 3fr 2fr;
+        gap: 14px;
+        margin-top: 14px;
+      }
+      .stats {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 10px;
+      }
+      .stat {
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        padding: 10px;
+        background: #0e1220;
+      }
+      .stat .k {
+        font-size: 12px;
+        color: var(--muted);
+      }
+      .stat .v {
+        font-size: 20px;
+        font-weight: 650;
+        margin-top: 4px;
+      }
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 13px;
+      }
+      th, td {
+        border-bottom: 1px solid var(--border);
+        padding: 8px 6px;
+        text-align: left;
+      }
+      th { color: var(--muted); font-weight: 600; }
+      .small { font-size: 12px; color: var(--muted); }
+      @media (max-width: 980px) {
+        .controls { grid-template-columns: 1fr 1fr; }
+        .grid { grid-template-columns: 1fr; }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <div class="topbar">
+        <div>
+          <div class="title">GNSS Recorder Dashboard</div>
+          <div class="meta" id="metaLine">Loading...</div>
+        </div>
+        <div class="small">Recorded = green, missing = dark</div>
+      </div>
+
+      <div class="panel" style="margin-top: 14px;">
+        <div class="controls">
+          <div>
+            <label for="receiverSel">Receiver (by filename prefix)</label>
+            <select id="receiverSel"></select>
+          </div>
+          <div>
+            <label for="weekDay">Any day in week</label>
+            <input id="weekDay" type="date" />
+          </div>
+          <div>
+            <label>Week start (Mon)</label>
+            <input id="weekStart" type="text" disabled />
+          </div>
+          <div>
+            <label>&nbsp;</label>
+            <button id="prevWeek">← Prev week</button>
+          </div>
+        </div>
+        <div class="controls" style="grid-template-columns: 1fr 1fr 1fr 1fr; margin-top: 10px;">
+          <button id="nextWeek">Next week →</button>
+          <button id="todayBtn">Jump to latest</button>
+          <button id="reloadBtn">Reload from server DB</button>
+          <button id="openJsonBtn">Open /api/meta</button>
+        </div>
+      </div>
+
+      <div class="grid">
+        <div class="panel">
+          <div style="display:flex;justify-content:space-between;align-items:baseline;gap:10px;flex-wrap:wrap;">
+            <div style="font-weight:650;">Weekly coverage (7×24)</div>
+            <div class="small">Hover cells for details</div>
+          </div>
+          <div id="heat" style="height: 360px;"></div>
+        </div>
+        <div class="panel">
+          <div style="font-weight:650;margin-bottom:10px;">Stats + gaps</div>
+          <div class="stats">
+            <div class="stat"><div class="k">Coverage</div><div class="v" id="covPct">—</div></div>
+            <div class="stat"><div class="k">Recorded hours</div><div class="v" id="recHours">—</div></div>
+            <div class="stat"><div class="k">Missing hours</div><div class="v" id="missHours">—</div></div>
+            <div class="stat"><div class="k">Files in week (approx)</div><div class="v" id="filesWeek">—</div></div>
+          </div>
+
+          <div style="margin-top: 12px; font-weight: 650;">Missing hours</div>
+          <div class="small" style="margin: 6px 0 10px;">Up to first 250 missing hours this week</div>
+          <div style="max-height: 280px; overflow:auto;">
+            <table>
+              <thead><tr><th>Date</th><th>Hour</th></tr></thead>
+              <tbody id="gapsBody"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <script>
+      const DAYS = ["Mon","Tue","Wed","Thu","Fri","Sat","Sun"];
+
+      function iso(d) {
+        const y = d.getFullYear();
+        const m = String(d.getMonth()+1).padStart(2,"0");
+        const dd = String(d.getDate()).padStart(2,"0");
+        return `${y}-${m}-${dd}`;
+      }
+      function parseISO(s) {
+        const [y,m,d] = s.split("-").map(x => parseInt(x,10));
+        return new Date(y, m-1, d);
+      }
+      function mondayOf(d) {
+        const x = new Date(d);
+        const jsDow = (x.getDay() + 6) % 7; // Mon=0
+        x.setDate(x.getDate() - jsDow);
+        x.setHours(0,0,0,0);
+        return x;
+      }
+
+      function addDays(d, n) {
+        const x = new Date(d);
+        x.setDate(x.getDate() + n);
+        return x;
+      }
+
+      async function loadMeta() {
+        const res = await fetch("/api/meta", { cache: "no-store" });
+        if (!res.ok) throw new Error(`Failed to load /api/meta (${res.status})`);
+        return await res.json();
+      }
+
+      async function loadWeek(receiver, weekStartISO) {
+        const qs = new URLSearchParams({ receiver, week_start: weekStartISO });
+        const res = await fetch(`/api/week?${qs.toString()}`, { cache: "no-store" });
+        if (!res.ok) throw new Error(`Failed to load /api/week (${res.status})`);
+        return await res.json();
+      }
+
+      function weekGridFromWeekApi(weekApi, weekStartISO) {
+        const ws = parseISO(weekStartISO);
+        const grid = [];
+        let filesWeek = 0;
+
+        const byDateHour = new Map();
+        for (const r of (weekApi?.data ?? [])) {
+          byDateHour.set(`${r.date}|${r.hour}`, r.n_files);
+        }
+
+        for (let dow = 0; dow < 7; dow++) {
+          const dISO = iso(addDays(ws, dow));
+          for (let h = 0; h < 24; h++) {
+            const nf = parseInt(byDateHour.get(`${dISO}|${h}`) ?? 0, 10);
+            filesWeek += nf;
+            grid.push({ dow, hour: h, recorded: nf > 0, n_files: nf, date: dISO });
+          }
+        }
+        return { grid, filesWeek };
+      }
+
+      function renderHeat(grid) {
+        const z = [];
+        const custom = [];
+        for (let dow = 0; dow < 7; dow++) {
+          const row = [];
+          const rowC = [];
+          for (let h = 0; h < 24; h++) {
+            const cell = grid.find(x => x.dow === dow && x.hour === h);
+            row.push(cell?.recorded ? 1 : 0);
+            rowC.push(cell?.n_files ?? 0);
+          }
+          z.push(row);
+          custom.push(rowC);
+        }
+
+        const data = [{
+          type: "heatmap",
+          z,
+          x: [...Array(24).keys()],
+          y: DAYS,
+          zmin: 0,
+          zmax: 1,
+          colorscale: [
+            [0.0, "#2b2b2b"],
+            [1.0, "#00b894"],
+          ],
+          showscale: false,
+          customdata: custom,
+          hovertemplate: "Day=%{y}<br>Hour=%{x}:00<br>Recorded=%{z}<br>Files=%{customdata}<extra></extra>",
+        }];
+        const layout = {
+          margin: { l: 40, r: 10, t: 10, b: 40 },
+          paper_bgcolor: "rgba(0,0,0,0)",
+          plot_bgcolor: "rgba(0,0,0,0)",
+          font: { color: "#e6e6e6" },
+          xaxis: { title: "Hour (0-23)", dtick: 1, gridcolor: "#242b3b" },
+          yaxis: { title: "", gridcolor: "#242b3b" },
+        };
+        Plotly.newPlot("heat", data, layout, { displayModeBar: false, responsive: true });
+      }
+
+      function renderStatsAndGaps(grid, filesWeek) {
+        const recorded = grid.filter(x => x.recorded).length;
+        const missing = 168 - recorded;
+        const cov = (100.0 * recorded / 168.0).toFixed(1) + "%";
+
+        document.getElementById("covPct").textContent = cov;
+        document.getElementById("recHours").textContent = `${recorded}/168`;
+        document.getElementById("missHours").textContent = `${missing}/168`;
+        document.getElementById("filesWeek").textContent = String(filesWeek);
+
+        const gaps = grid.filter(x => !x.recorded).slice(0, 250);
+        const tb = document.getElementById("gapsBody");
+        tb.innerHTML = "";
+        for (const g of gaps) {
+          const tr = document.createElement("tr");
+          const td1 = document.createElement("td");
+          const td2 = document.createElement("td");
+          td1.textContent = g.date;
+          td2.textContent = String(g.hour).padStart(2,"0");
+          tr.appendChild(td1);
+          tr.appendChild(td2);
+          tb.appendChild(tr);
+        }
+      }
+
+      let meta = null;
+
+      function syncWeekStart() {
+        const dayVal = document.getElementById("weekDay").value;
+        const ws = mondayOf(parseISO(dayVal));
+        document.getElementById("weekStart").value = iso(ws);
+      }
+
+      async function render() {
+        const receiver = document.getElementById("receiverSel").value;
+        syncWeekStart();
+        const wsISO = document.getElementById("weekStart").value;
+
+        // Guardrail: if user selects week outside DB range, keep UI honest.
+        if (meta?.min_date && meta?.max_date) {
+          if (wsISO < meta.min_date || wsISO > meta.max_date) {
+            document.getElementById("metaLine").textContent =
+              `DB: ${meta.db_path} · Range: ${meta.min_date} .. ${meta.max_date} · Receivers: ${meta.receivers?.length ?? 0} · (Selected week is outside data range)`;
+          } else {
+            document.getElementById("metaLine").textContent =
+              `DB: ${meta.db_path} · Range: ${meta.min_date} .. ${meta.max_date} · Receivers: ${meta.receivers?.length ?? 0}`;
+          }
+        }
+
+        const weekApi = await loadWeek(receiver, wsISO);
+        const { grid, filesWeek } = weekGridFromWeekApi(weekApi, wsISO);
+        renderHeat(grid);
+        renderStatsAndGaps(grid, filesWeek);
+      }
+
+      async function init() {
+        meta = await loadMeta();
+
+        document.getElementById("metaLine").textContent =
+          `DB: ${meta.db_path} · Range: ${meta.min_date ?? "?"} .. ${meta.max_date ?? "?"} · Receivers: ${meta.receivers?.length ?? 0}`;
+
+        const sel = document.getElementById("receiverSel");
+        sel.innerHTML = "";
+        for (const r of (meta.receivers ?? [])) {
+          const opt = document.createElement("option");
+          opt.value = r;
+          opt.textContent = r;
+          sel.appendChild(opt);
+        }
+
+        const defaultDay = meta.max_date ?? iso(new Date());
+        document.getElementById("weekDay").value = defaultDay;
+        syncWeekStart();
+
+        document.getElementById("receiverSel").addEventListener("change", () => render().catch(console.error));
+        document.getElementById("weekDay").addEventListener("change", () => render().catch(console.error));
+
+        document.getElementById("prevWeek").addEventListener("click", () => {
+          const d = parseISO(document.getElementById("weekDay").value);
+          document.getElementById("weekDay").value = iso(addDays(d, -7));
+          render().catch(console.error);
+        });
+        document.getElementById("nextWeek").addEventListener("click", () => {
+          const d = parseISO(document.getElementById("weekDay").value);
+          document.getElementById("weekDay").value = iso(addDays(d, 7));
+          render().catch(console.error);
+        });
+        document.getElementById("todayBtn").addEventListener("click", () => {
+          document.getElementById("weekDay").value = meta.max_date ?? iso(new Date());
+          render().catch(console.error);
+        });
+        document.getElementById("reloadBtn").addEventListener("click", async () => {
+          meta = await loadMeta();
+          document.getElementById("metaLine").textContent =
+            `DB: ${meta.db_path} · Range: ${meta.min_date ?? "?"} .. ${meta.max_date ?? "?"} · Receivers: ${meta.receivers?.length ?? 0}`;
+          render().catch(console.error);
+        });
+        document.getElementById("openJsonBtn").addEventListener("click", () => {
+          window.open("/api/meta", "_blank");
+        });
+
+        await render();
+      }
+
+      init().catch(err => {
+        document.getElementById("metaLine").textContent = String(err);
+      });
+    </script>
+  </body>
+</html>
+

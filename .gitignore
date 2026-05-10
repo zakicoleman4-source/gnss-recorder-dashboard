@@ -1,0 +1,76 @@
+# ── Python ────────────────────────────────────────────────────────────────────
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# ── Virtual environments ───────────────────────────────────────────────────────
+.venv/
+.venv_*/
+venv/
+env/
+
+# ── OS / editor ───────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+
+# ── Streamlit ─────────────────────────────────────────────────────────────────
+.streamlit/secrets.toml
+
+# ── Claude Code local settings ────────────────────────────────────────────────
+.claude/settings.local.json
+
+# ── Databases & scan caches ───────────────────────────────────────────────────
+*.db
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+*.sqlite-journal
+
+# ── Debug & log files ─────────────────────────────────────────────────────────
+*.log
+debug-c48812*
+offline_installer/install_offline.log
+
+# ── GNSS data files (large binaries — keep only test samples in tests/) ───────
+*.T02
+*.TO2
+*.T04
+*.TO4
+*.t02
+*.to2
+*.t04
+*.to4
+*.dat
+*.eph
+out.n
+out.o
+
+# ── Archives ──────────────────────────────────────────────────────────────────
+*.zip
+
+# ── Large data folders (year archives, GeoNet downloads) ──────────────────────
+2025/
+2026/
+2027/
+geonet_*/
+._cache_*/
+
+# ── Scan output folders ───────────────────────────────────────────────────────
+*_scanned/
+*_scanned_*/
+
+# ── Temp / scratch folders ────────────────────────────────────────────────────
+tmp_*/
+_tmp_*/
+
+# ── Converter / binary tools (distribute separately) ─────────────────────────
+tools/
+
+# ── Receiver config (site-specific, use receivers_template.csv instead) ───────
+receivers.csv
+
+# ── geonet sample data ────────────────────────────────────────────────────────
+geonet_sample/
