@@ -894,9 +894,24 @@ def run_pipeline(cfg: PipelineConfig, progress_cb=None) -> Path:
     exclude = [cfg.cache_dir]
 
     _PIPELINE_LOCK.acquire()
-    conn = _db_connect(db_path)
+    conn = None
     try:
-        _db_init(conn)
+        conn = _db_connect(db_path)
+        try:
+            _db_init(conn)
+        except sqlite3.OperationalError as _e:
+            if "locked" not in str(_e).lower():
+                raise
+            # Stale WAL-mode or crashed DB — nuke and recreate.
+            conn.close()
+            conn = None
+            for _suf in ("", "-wal", "-shm", "-journal"):
+                try:
+                    Path(str(db_path) + _suf).unlink()
+                except OSError:
+                    pass
+            conn = _db_connect(db_path)
+            _db_init(conn)
         if cfg.max_files_per_station is not None:
             files = _pick_probe_files(
                 cfg.data_root,
@@ -1163,7 +1178,8 @@ def run_pipeline(cfg: PipelineConfig, progress_cb=None) -> Path:
         except Exception:
             pass
     finally:
-        conn.close()
+        if conn is not None:
+            conn.close()
         _PIPELINE_LOCK.release()
 
     return db_path
