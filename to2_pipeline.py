@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gc
 import hashlib
 import json
 import os
@@ -9,6 +10,7 @@ import sqlite3
 import subprocess
 import tempfile
 import threading
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -362,10 +364,15 @@ def _file_sig(p: Path) -> tuple[int, int]:
 
 
 def _db_connect(db_path: Path) -> sqlite3.Connection:
-    conn = sqlite3.connect(str(db_path), timeout=30, check_same_thread=False)
+    # isolation_level=None: pure autocommit — eliminates Python's implicit
+    # transaction management which intermittently causes "database is locked"
+    # when PRAGMA / DDL / DML are interleaved. Explicit BEGIN/COMMIT used in
+    # the scan loop for batching. WAL mode lets readers proceed during writes.
+    conn = sqlite3.connect(str(db_path), timeout=30, check_same_thread=False,
+                           isolation_level=None)
     conn.row_factory = sqlite3.Row
-    # busy_timeout must come before any write — including journal_mode change.
     conn.execute("PRAGMA busy_timeout=30000;")
+    conn.execute("PRAGMA journal_mode=WAL;")
     conn.execute("PRAGMA synchronous=NORMAL;")
     return conn
 
@@ -905,6 +912,10 @@ def run_pipeline(cfg: PipelineConfig, progress_cb=None) -> Path:
             # Stale WAL-mode or crashed DB — nuke and recreate.
             conn.close()
             conn = None
+            # gc.collect() forces Python to release the underlying file
+            # handle on Windows (which keeps handles alive until GC).
+            gc.collect()
+            time.sleep(0.15)
             for _suf in ("", "-wal", "-shm", "-journal"):
                 try:
                     Path(str(db_path) + _suf).unlink()
@@ -953,6 +964,7 @@ def run_pipeline(cfg: PipelineConfig, progress_cb=None) -> Path:
         failed = 0
         skipped_empty = 0
 
+        conn.execute("BEGIN")
         for i, p in enumerate(files, start=1):
             if progress_cb:
                 progress_cb(i, total, str(p))
@@ -1147,7 +1159,8 @@ def run_pipeline(cfg: PipelineConfig, progress_cb=None) -> Path:
                 )
                 if processed % 250 == 0:
                     try:
-                        conn.commit()
+                        conn.execute("COMMIT")
+                        conn.execute("BEGIN")
                     except Exception:
                         pass
             except Exception:
@@ -1174,7 +1187,7 @@ def run_pipeline(cfg: PipelineConfig, progress_cb=None) -> Path:
                     pass
 
         try:
-            conn.commit()
+            conn.execute("COMMIT")
         except Exception:
             pass
     finally:
