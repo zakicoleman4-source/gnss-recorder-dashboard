@@ -366,9 +366,10 @@ def _db_connect(db_path: Path) -> sqlite3.Connection:
 
 
 def _db_init(conn: sqlite3.Connection) -> None:
-    conn.executescript(
-        """
-        CREATE TABLE IF NOT EXISTS files (
+    # Use individual execute() calls — executescript() bypasses busy_timeout
+    # and raises immediately on a locked DB instead of retrying.
+    ddl = [
+        """CREATE TABLE IF NOT EXISTS files (
           path               TEXT PRIMARY KEY,
           station            TEXT NOT NULL,
           size_bytes         INTEGER NOT NULL,
@@ -392,9 +393,8 @@ def _db_init(conn: sqlite3.Connection) -> None:
           completeness_pct   REAL,
           intra_file_gap_count INTEGER,
           updated_at         TEXT NOT NULL
-        );
-
-        CREATE TABLE IF NOT EXISTS intra_file_gaps (
+        )""",
+        """CREATE TABLE IF NOT EXISTS intra_file_gaps (
           id             INTEGER PRIMARY KEY AUTOINCREMENT,
           path           TEXT NOT NULL,
           station        TEXT NOT NULL,
@@ -402,14 +402,14 @@ def _db_init(conn: sqlite3.Connection) -> None:
           gap_end_utc    TEXT NOT NULL,
           gap_epochs     INTEGER NOT NULL,
           gap_seconds    REAL NOT NULL
-        );
-
-        CREATE INDEX IF NOT EXISTS idx_files_station_first ON files(station, time_first_obs);
-        CREATE INDEX IF NOT EXISTS idx_files_station_date  ON files(station, filename_date, filename_hour);
-        CREATE INDEX IF NOT EXISTS idx_ifg_path            ON intra_file_gaps(path);
-        CREATE INDEX IF NOT EXISTS idx_ifg_station         ON intra_file_gaps(station);
-        """
-    )
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_files_station_first ON files(station, time_first_obs)",
+        "CREATE INDEX IF NOT EXISTS idx_files_station_date  ON files(station, filename_date, filename_hour)",
+        "CREATE INDEX IF NOT EXISTS idx_ifg_path            ON intra_file_gaps(path)",
+        "CREATE INDEX IF NOT EXISTS idx_ifg_station         ON intra_file_gaps(station)",
+    ]
+    for stmt in ddl:
+        conn.execute(stmt)
     conn.commit()
 
     # Migrate existing DBs — ALTER TABLE is a no-op if column already exists
