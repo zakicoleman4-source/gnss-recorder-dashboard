@@ -30,19 +30,9 @@ class PipelineConfig:
     runpkr00_path: Optional[Path] = None
     teqc_path: Optional[Path] = None
     rinex_ver: str = "3.04"
-    # If set, limits how many files we attempt per station during run_pipeline.
-    # Useful for "probe" mode to quickly extract station coords/signals.
     max_files_per_station: Optional[int] = None
-    # If True, once a station has a successful conversion, skip remaining files for that station.
-    # Default is False so that "FULL scan" really processes every file. Probe mode in the
-    # dashboard explicitly sets this to True.
     stop_after_success_per_station: bool = False
-    # In probe mode, stop scanning after examining at most this many TO files.
-    # Generous default: high enough that very large archives still discover every station,
-    # but bounded so a corrupt symlink loop can't spin forever.
     probe_max_total_files: int = 200_000
-    # Optional: override conversion with a custom command template.
-    # Use {input} and {out_dir} placeholders.
     convert_cmd_template: Optional[str] = None
 
 
@@ -53,14 +43,8 @@ def _utc_now_iso() -> str:
 def _iter_to_files(root: Path, exclude_dirs: Optional[Iterable[Path]] = None) -> Iterable[Path]:
     """
     Walk `root` and yield TO2/T02/TO4/T04 files (case-insensitive).
-
-    `exclude_dirs` is an optional iterable of subtrees to skip (e.g. our own
-    cache_dir if it lives inside data_root). We compare resolved paths so a
-    subfolder of an excluded dir is also skipped.
-
-    Robustness:
-    - Tolerates bad symlinks / permission errors per file (continue, do not crash).
-    - Skips known excluded subtrees in-place by mutating `dirnames`.
+    Tolerates bad symlinks / permission errors per file.
+    Skips excluded subtrees in-place.
     """
     excl_resolved: list[Path] = []
     for d in exclude_dirs or []:
@@ -88,7 +72,6 @@ def _iter_to_files(root: Path, exclude_dirs: Optional[Iterable[Path]] = None) ->
             dp_resolved = Path(dirpath).resolve()
         except Exception:
             dp_resolved = Path(dirpath)
-        # Prune excluded subtrees in-place so os.walk doesn't descend into them.
         if excl_resolved:
             keep = []
             for d in list(dirnames):
@@ -116,15 +99,6 @@ def _pick_probe_files(
     max_total_files: int,
     exclude_dirs: Optional[Iterable[Path]] = None,
 ) -> list[Path]:
-    """
-    Fast "probe" selector: pick up to N files per station prefix without
-    scanning the entire archive.
-
-    `max_total_files` is a safety cap (default huge) so a corrupted/symlink-loop
-    folder can't spin forever. We do NOT stop early on station count: we keep
-    examining until we hit the cap or finish the walk, so we never silently
-    miss a station that only appears late in the walk order.
-    """
     picked: dict[str, list[Path]] = {}
     examined = 0
     for p in _iter_to_files(root, exclude_dirs=exclude_dirs):
@@ -152,31 +126,25 @@ def _station_from_filename(name: str) -> str:
 
 
 # ── Filename timestamp parsing ────────────────────────────────────────────────
-# Trimble T02/TO2 files embed the recording start time in the filename.
-# Two common layouts:
-#   MMDD layout: SSSSYYYYMMDDHH[MM[SS]][a].T02  e.g. AHTI202603010000a.T02
-#   DOY  layout: SSSSYYYYDDDHHMMSS[a].T02       e.g. AHTI20260600000a.T02
-
 _FN_DT_MMDD = re.compile(
-    r"[A-Za-z]{0,4}"              # station prefix (0–4 letters, may be absent)
-    r"((?:19|20)\d{2})"           # year (4 digits)
-    r"(0[1-9]|1[0-2])"            # month 01–12
-    r"(0[1-9]|[12]\d|3[01])"      # day 01–31
-    r"([01]\d|2[0-3])"            # hour 00–23
-    r"\d{2}"                      # minute (ignored)
-    r"(?:\d{2})?"                 # optional second
-    r"[a-zA-Z]?"                  # optional session letter (Trimble convention)
-    r"(?=\.)",                    # lookahead: must be followed by extension dot
+    r"[A-Za-z]{0,4}"
+    r"((?:19|20)\d{2})"
+    r"(0[1-9]|1[0-2])"
+    r"(0[1-9]|[12]\d|3[01])"
+    r"([01]\d|2[0-3])"
+    r"\d{2}"
+    r"(?:\d{2})?"
+    r"[a-zA-Z]?"
+    r"(?=\.)",
     re.IGNORECASE,
 )
-
 _FN_DT_DOY = re.compile(
     r"[A-Za-z]{0,4}"
-    r"((?:19|20)\d{2})"           # year
-    r"(00[1-9]|0[1-9]\d|[12]\d{2}|3[0-5]\d|36[0-6])"  # day-of-year 001–366
-    r"([01]\d|2[0-3])"            # hour
-    r"\d{2}"                      # minute
-    r"(?:\d{2})?"                 # optional second
+    r"((?:19|20)\d{2})"
+    r"(00[1-9]|0[1-9]\d|[12]\d{2}|3[0-5]\d|36[0-6])"
+    r"([01]\d|2[0-3])"
+    r"\d{2}"
+    r"(?:\d{2})?"
     r"[a-zA-Z]?"
     r"(?=\.)",
     re.IGNORECASE,
@@ -184,20 +152,14 @@ _FN_DT_DOY = re.compile(
 
 
 def _parse_filename_dt(name: str) -> tuple[Optional[str], Optional[int]]:
-    """
-    Return ``(iso_date, hour)`` parsed from a Trimble T02 filename, or
-    ``(None, None)`` if the filename does not match a known layout.
-
-    Tries MMDD layout first (most common), then DOY layout.
-    """
+    """Return (iso_date, hour) from Trimble filename, or (None, None)."""
     import datetime as _dt
 
     m = _FN_DT_MMDD.search(name)
     if m:
         try:
             y, mo, d, h = int(m.group(1)), int(m.group(2)), int(m.group(3)), int(m.group(4))
-            date_str = _dt.date(y, mo, d).isoformat()
-            return date_str, h
+            return _dt.date(y, mo, d).isoformat(), h
         except (ValueError, OverflowError):
             pass
 
@@ -205,8 +167,7 @@ def _parse_filename_dt(name: str) -> tuple[Optional[str], Optional[int]]:
     if m:
         try:
             y, doy, h = int(m.group(1)), int(m.group(2)), int(m.group(3))
-            date_str = (_dt.date(y, 1, 1) + _dt.timedelta(days=doy - 1)).isoformat()
-            return date_str, h
+            return (_dt.date(y, 1, 1) + _dt.timedelta(days=doy - 1)).isoformat(), h
         except (ValueError, OverflowError):
             pass
 
@@ -224,6 +185,166 @@ def _duration_s(t_first: Optional[str], t_last: Optional[str]) -> Optional[float
         return diff if diff >= 0 else None
     except Exception:
         return None
+
+
+# ── RINEX epoch-level statistics ─────────────────────────────────────────────
+# Matches RINEX 3 epoch header line: "> YYYY MM DD HH MM SS.sss  flag  nsv"
+_EPOCH_R3 = re.compile(
+    r"^>\s+(\d{4})\s+(\d{1,2})\s+(\d{1,2})\s+(\d{1,2})\s+(\d{1,2})\s+([\d.]+)"
+)
+
+_STANDARD_INTERVALS = [
+    0.05, 0.1, 0.2, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0,
+    15.0, 30.0, 60.0, 120.0, 300.0, 600.0, 900.0, 1800.0, 3600.0,
+]
+
+
+def _snap_interval(raw: float) -> float:
+    """Round a detected epoch interval to the nearest standard GNSS recording rate."""
+    return min(_STANDARD_INTERVALS, key=lambda s: abs(s - raw))
+
+
+def _parse_rinex_epochs(obs_path: Path, max_epochs: int = 500_000) -> dict:
+    """
+    Stream-parse a RINEX obs file for epoch statistics. Never raises.
+
+    Returns:
+      interval_s           : detected sample interval in seconds
+      total_epochs         : count of valid epoch records read
+      intra_file_gap_count : number of data gaps detected within the file
+      intra_file_gaps      : list of {gap_start_utc, gap_end_utc, gap_epochs, gap_seconds}
+    """
+    _empty: dict = {
+        "interval_s": None,
+        "total_epochs": 0,
+        "intra_file_gap_count": 0,
+        "intra_file_gaps": [],
+    }
+    try:
+        if not obs_path.exists() or obs_path.stat().st_size == 0:
+            return _empty
+    except OSError:
+        return _empty
+
+    from datetime import datetime as _dtime
+
+    timestamps: list[_dtime] = []
+    rinex3 = True   # convbin default output is RINEX 3; update from header
+    in_header = True
+
+    try:
+        with obs_path.open("rb") as fh:
+            for raw in fh:
+                try:
+                    line = raw.decode("ascii", errors="ignore").rstrip("\r\n")
+                except Exception:
+                    continue
+
+                if in_header:
+                    if "RINEX VERSION / TYPE" in line:
+                        try:
+                            rinex3 = float(line[:9].strip()) >= 3.0
+                        except Exception:
+                            pass
+                    if "END OF HEADER" in line:
+                        in_header = False
+                    continue
+
+                ts: Optional[_dtime] = None
+
+                if rinex3:
+                    m = _EPOCH_R3.match(line)
+                    if m:
+                        try:
+                            y, mo, d, h, mi = (int(m.group(i)) for i in range(1, 6))
+                            sf = float(m.group(6))
+                            s = int(sf)
+                            us = min(int(round((sf - s) * 1_000_000)), 999_999)
+                            ts = _dtime(y, mo, d, h, mi, s, us)
+                        except Exception:
+                            pass
+                else:
+                    # RINEX 2 epoch line: " YY MM DD HH MI SS.s  flag  nsv ..."
+                    # Distinguish from observation lines by requiring ≥8 fields and
+                    # valid date/flag/nsv ranges.
+                    if line and line[0] == " ":
+                        parts = line.split()
+                        if len(parts) >= 8:
+                            try:
+                                yy = int(parts[0])
+                                mo = int(parts[1])
+                                d  = int(parts[2])
+                                h  = int(parts[3])
+                                mi = int(parts[4])
+                                sf = float(parts[5])
+                                flag = int(parts[6])
+                                nsv  = int(parts[7])
+                                if (0 <= yy <= 99 and 1 <= mo <= 12 and 1 <= d <= 31
+                                        and 0 <= h <= 23 and 0 <= mi <= 59
+                                        and 0 <= flag <= 6 and 1 <= nsv <= 99):
+                                    y = 2000 + yy if yy < 80 else 1900 + yy
+                                    s = int(sf)
+                                    us = min(int(round((sf - s) * 1_000_000)), 999_999)
+                                    ts = _dtime(y, mo, d, h, mi, s, us)
+                            except Exception:
+                                pass
+
+                if ts is not None:
+                    timestamps.append(ts)
+                    if len(timestamps) >= max_epochs:
+                        break
+
+    except Exception:
+        return _empty
+
+    n = len(timestamps)
+    result = dict(_empty)
+    result["total_epochs"] = n
+
+    if n < 2:
+        return result
+
+    # Compute consecutive time diffs
+    diffs: list[float] = []
+    for i in range(1, n):
+        try:
+            d = (timestamps[i] - timestamps[i - 1]).total_seconds()
+            if 0.0 < d < 86_400.0:
+                diffs.append(d)
+            else:
+                diffs.append(0.0)   # placeholder keeps index alignment with timestamps
+        except Exception:
+            diffs.append(0.0)
+
+    pos_diffs = sorted(d for d in diffs if d > 0)
+    if not pos_diffs:
+        return result
+
+    # Use lower quartile of positive diffs — robust against gaps inflating the median
+    q25 = pos_diffs[max(0, len(pos_diffs) // 4)]
+    if q25 <= 0:
+        return result
+    interval_s = _snap_interval(q25)
+    result["interval_s"] = interval_s
+
+    # Detect gaps: diff > 1.5× interval
+    threshold = interval_s * 1.5
+    gaps: list[dict] = []
+    for i, diff in enumerate(diffs):
+        if diff > threshold:
+            gap_start = timestamps[i]
+            gap_end   = timestamps[i + 1]
+            missed = max(0, round(diff / interval_s) - 1)
+            gaps.append({
+                "gap_start_utc": gap_start.isoformat(),
+                "gap_end_utc":   gap_end.isoformat(),
+                "gap_epochs":    int(missed),
+                "gap_seconds":   round(diff, 3),
+            })
+
+    result["intra_file_gap_count"] = len(gaps)
+    result["intra_file_gaps"] = gaps
+    return result
 
 
 def _file_sig(p: Path) -> tuple[int, int]:
@@ -247,43 +368,66 @@ def _db_init(conn: sqlite3.Connection) -> None:
     conn.executescript(
         """
         CREATE TABLE IF NOT EXISTS files (
-          path TEXT PRIMARY KEY,
-          station TEXT NOT NULL,
-          size_bytes INTEGER NOT NULL,
-          mtime INTEGER NOT NULL,
-          rinex_obs_path TEXT,
-          time_first_obs TEXT,
-          time_last_obs TEXT,
-          lat REAL,
-          lon REAL,
-          height_m REAL,
-          constellations TEXT,
-          signals TEXT,
-          convert_status TEXT,
-          convert_detail TEXT,
-          filename_date TEXT,
-          filename_hour INTEGER,
-          duration_s REAL,
-          updated_at TEXT NOT NULL
+          path               TEXT PRIMARY KEY,
+          station            TEXT NOT NULL,
+          size_bytes         INTEGER NOT NULL,
+          mtime              INTEGER NOT NULL,
+          rinex_obs_path     TEXT,
+          time_first_obs     TEXT,
+          time_last_obs      TEXT,
+          lat                REAL,
+          lon                REAL,
+          height_m           REAL,
+          constellations     TEXT,
+          signals            TEXT,
+          convert_status     TEXT,
+          convert_detail     TEXT,
+          filename_date      TEXT,
+          filename_hour      INTEGER,
+          duration_s         REAL,
+          interval_s         REAL,
+          total_epochs       INTEGER,
+          expected_epochs    INTEGER,
+          completeness_pct   REAL,
+          intra_file_gap_count INTEGER,
+          updated_at         TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS intra_file_gaps (
+          id             INTEGER PRIMARY KEY AUTOINCREMENT,
+          path           TEXT NOT NULL,
+          station        TEXT NOT NULL,
+          gap_start_utc  TEXT NOT NULL,
+          gap_end_utc    TEXT NOT NULL,
+          gap_epochs     INTEGER NOT NULL,
+          gap_seconds    REAL NOT NULL
         );
 
         CREATE INDEX IF NOT EXISTS idx_files_station_first ON files(station, time_first_obs);
         CREATE INDEX IF NOT EXISTS idx_files_station_date  ON files(station, filename_date, filename_hour);
+        CREATE INDEX IF NOT EXISTS idx_ifg_path            ON intra_file_gaps(path);
+        CREATE INDEX IF NOT EXISTS idx_ifg_station         ON intra_file_gaps(station);
         """
     )
     conn.commit()
-    # Migrate existing DBs that pre-date these columns (ALTER TABLE is a no-op if
-    # the column already exists in SQLite >= 3.37; for older SQLite we catch and ignore).
+
+    # Migrate existing DBs — ALTER TABLE is a no-op if column already exists
+    # (SQLite ≥ 3.37 raises OperationalError; we catch and ignore).
     for col, typedef in [
-        ("filename_date", "TEXT"),
-        ("filename_hour", "INTEGER"),
-        ("duration_s",    "REAL"),
+        ("filename_date",         "TEXT"),
+        ("filename_hour",         "INTEGER"),
+        ("duration_s",            "REAL"),
+        ("interval_s",            "REAL"),
+        ("total_epochs",          "INTEGER"),
+        ("expected_epochs",       "INTEGER"),
+        ("completeness_pct",      "REAL"),
+        ("intra_file_gap_count",  "INTEGER"),
     ]:
         try:
             conn.execute(f"ALTER TABLE files ADD COLUMN {col} {typedef}")
             conn.commit()
         except sqlite3.OperationalError:
-            pass  # column already exists
+            pass
 
 
 def _read_rinex_header_lines(path: Path, max_bytes: int = 256 * 1024) -> list[str]:
@@ -304,17 +448,11 @@ def _read_rinex_header_lines(path: Path, max_bytes: int = 256 * 1024) -> list[st
 def _parse_rinex_time(line: str) -> Optional[pd.Timestamp]:
     """
     RINEX "TIME OF FIRST/LAST OBS" header line.
-
-    Spec layout: 6I6, F13.7, 5X, A3 (year, month, day, hour, min, sec, ..., sys).
-    Reality: many vendors leave varying whitespace. We try fixed columns first,
-    fall back to a tolerant numeric scan that explicitly clips off the
-    "TIME OF ..." trailing label so we never mis-parse it as a number.
+    Tries fixed columns first (spec), falls back to tolerant numeric scan.
     """
     if not line:
         return None
-    # Strip the trailing label so regex doesn't pick up digits inside it.
     head = line[:60]
-    # First try strict spec columns
     try:
         y = int(head[0:6].strip())
         mo = int(head[6:12].strip())
@@ -324,12 +462,10 @@ def _parse_rinex_time(line: str) -> Optional[pd.Timestamp]:
         sec = float(head[30:43].strip())
         s = int(sec)
         us = int(round((sec - s) * 1_000_000))
-        # Sanity check on year so we don't accept "0001" from junk data.
         if 1900 <= y <= 2100 and 1 <= mo <= 12 and 1 <= d <= 31 and 0 <= h < 24 and 0 <= mi < 60:
             return pd.Timestamp(year=y, month=mo, day=d, hour=h, minute=mi, second=s, microsecond=us, tz="UTC")
     except Exception:
         pass
-    # Fallback: tolerant numeric scan (still bounded to the columns area).
     nums = re.findall(r"[-+]?\d+\.\d+|[-+]?\d+", head)
     if len(nums) < 6:
         return None
@@ -347,14 +483,12 @@ def _parse_rinex_time(line: str) -> Optional[pd.Timestamp]:
 
 def _parse_rinex_position_xyz(line: str) -> Optional[tuple[float, float, float]]:
     """
-    "APPROX POSITION XYZ" header line. Spec: 3F14.4 in cols 1..42.
-    Real-world files sometimes use scientific notation; tolerate that.
-    Reject obviously bad triples (all-zero, NaN, or radius outside Earth bounds).
+    "APPROX POSITION XYZ" header line. Tolerates scientific notation.
+    Rejects all-zero, NaN/Inf, and off-Earth radii.
     """
     if not line:
         return None
     head = line[:60]
-    # Try fixed columns first.
     try:
         x = float(head[0:14].strip())
         y = float(head[14:28].strip())
@@ -373,7 +507,6 @@ def _parse_rinex_position_xyz(line: str) -> Optional[tuple[float, float, float]]
         return None
     if x == 0.0 and y == 0.0 and z == 0.0:
         return None
-    # Reject points clearly not on/near Earth (radius far outside ~6.4M m).
     r = _m.sqrt(x * x + y * y + z * z)
     if r < 5_000_000.0 or r > 8_000_000.0:
         return None
@@ -388,21 +521,18 @@ def _ecef_to_llh_wgs84(x: float, y: float, z: float) -> tuple[float, float, floa
     if x == 0.0 and y == 0.0 and z == 0.0:
         return 0.0, 0.0, 0.0
 
-    a = 6_378_137.0           # WGS84 semi-major axis (m)
-    f = 1.0 / 298.257_223_563  # flattening
-    e2 = f * (2.0 - f)        # first eccentricity squared
-    b = a * (1.0 - f)         # semi-minor axis
+    a = 6_378_137.0
+    f = 1.0 / 298.257_223_563
+    e2 = f * (2.0 - f)
+    b = a * (1.0 - f)
 
     lon = math.atan2(y, x)
     p = math.hypot(x, y)
 
-    # Polar singularity: point is on or very near the z-axis.
     if p < 1.0:
         sign = 1.0 if z >= 0.0 else -1.0
         return sign * 90.0, math.degrees(lon), abs(z) - b
 
-    # Bowring iterative method — converges in 3–4 iterations for any lat/height.
-    # Starting approximation: geocentric latitude reduced by e².
     lat = math.atan2(z, p * (1.0 - e2))
     for _ in range(10):
         sin_lat = math.sin(lat)
@@ -416,7 +546,6 @@ def _ecef_to_llh_wgs84(x: float, y: float, z: float) -> tuple[float, float, floa
     sin_lat = math.sin(lat)
     cos_lat = math.cos(lat)
     n = a / math.sqrt(1.0 - e2 * sin_lat * sin_lat)
-    # Dual formula: equatorial branch avoids /0 near poles; polar branch near equator.
     if abs(cos_lat) >= abs(sin_lat):
         h = p / cos_lat - n
     else:
@@ -424,19 +553,10 @@ def _ecef_to_llh_wgs84(x: float, y: float, z: float) -> tuple[float, float, floa
     return math.degrees(lat), math.degrees(lon), h
 
 
-_VALID_SYS = set("GREJCISG")  # GPS, GLO, GAL, QZSS, BDS, IRNSS, SBAS
+_VALID_SYS = set("GREJCISG")
 
 
 def _parse_rinex_signals(lines: list[str]) -> tuple[str | None, str | None]:
-    """
-    Collect constellation letters and observation codes from RINEX header.
-
-    RINEX3 spec: "SYS / # / OBS TYPES" rows have the constellation letter in
-    column 1 (G/R/E/J/C/I/S). Continuation lines start with a blank in col 1.
-
-    We only accept a single uppercase letter from `_VALID_SYS` so that
-    comments / weird whitespace don't pollute the constellation list.
-    """
     consts: set[str] = set()
     sigs: set[str] = set()
     last_sys: Optional[str] = None
@@ -447,12 +567,10 @@ def _parse_rinex_signals(lines: list[str]) -> tuple[str | None, str | None]:
                 consts.add(sys)
                 last_sys = sys
             elif ln[:1] == " " and last_sys:
-                # Continuation line for previous system.
                 pass
             for t in re.findall(r"\b[A-Z][0-9][A-Z]\b", ln):
                 sigs.add(t)
         elif "# / TYPES OF OBSERV" in ln:
-            # RINEX2: no constellation; assume GPS by convention.
             consts.add("G")
             for t in re.findall(r"\b[A-Z][0-9][A-Z]\b", ln):
                 sigs.add(t)
@@ -462,16 +580,14 @@ def _parse_rinex_signals(lines: list[str]) -> tuple[str | None, str | None]:
 
 
 def _safe_stem(p: Path) -> str:
-    # Keep filenames filesystem-safe and short-ish (Windows path length matters).
     stem = re.sub(r"[^A-Za-z0-9._-]+", "_", p.stem)
     stem = stem.strip("._-") or "file"
-    # add a short stable hash to avoid collisions between same stems
     h = hashlib.sha1(str(p).encode("utf-8", errors="ignore")).hexdigest()[:8]
     return f"{stem}_{h}"
 
 
 class ConverterError(RuntimeError):
-    """Raised internally so run_pipeline can record a useful detail message."""
+    """Raised so run_pipeline can record a useful detail message."""
 
 
 def _short_err(p: "subprocess.CompletedProcess[str]", limit: int = 240) -> str:
@@ -481,23 +597,12 @@ def _short_err(p: "subprocess.CompletedProcess[str]", limit: int = 240) -> str:
     return f"exit={p.returncode}: {err[:limit]}"
 
 
-# Subprocess defaults shared by every external converter call:
-#  - stdin=DEVNULL: prevents a tool that reads stdin from hanging forever
-#    waiting for input that will never come (we noticed runpkr00 doing this on
-#    a few client machines).
-#  - On Windows, also hide the console window so the dashboard UI doesn't
-#    flicker every time we spawn a converter (CREATE_NO_WINDOW).
 _SUBPROC_KW: dict = {"stdin": subprocess.DEVNULL}
 if os.name == "nt":
     _SUBPROC_KW["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
 
 
 def _runpkr00_gd_first_dat_or_tgd(runpkr00_path: Path, inp: Path, work_dir: Path) -> Optional[Path]:
-    """
-    Alternate Trimble decompress: ``runpkr00 -g -d`` (same spirit as scan_gnss_folder).
-
-    Returns the first ``.dat`` or ``.tgd`` in ``work_dir``, or None when nothing is produced.
-    """
     work_dir.mkdir(parents=True, exist_ok=True)
     local = work_dir / inp.name
     try:
@@ -508,16 +613,84 @@ def _runpkr00_gd_first_dat_or_tgd(runpkr00_path: Path, inp: Path, work_dir: Path
         subprocess.run(
             [str(runpkr00_path), "-g", "-d", str(local)],
             cwd=str(work_dir),
-            capture_output=True,
-            text=True,
-            timeout=120,
-            check=False,
+            capture_output=True, text=True, timeout=120, check=False,
             **_SUBPROC_KW,
         )
     except (subprocess.TimeoutExpired, Exception):
         return None
     hits = sorted(work_dir.glob("*.dat")) + sorted(work_dir.glob("*.tgd"))
     return hits[0] if hits else None
+
+
+def _runpkr00_make_dat(
+    runpkr00_path: Path,
+    inp: Path,
+    dat: Path,
+    eph: Path,
+    out_dir: Path,
+) -> None:
+    """
+    Run runpkr00 to produce .dat (and optionally .eph) from a T02/T04 file.
+    Tries -devg first; falls back to -g -d if no .dat produced.
+    Raises ConverterError on failure.
+    """
+    base = dat.with_suffix("")
+    try:
+        p1 = subprocess.run(
+            [str(runpkr00_path), "-devg", str(inp), str(base)],
+            cwd=str(out_dir),
+            capture_output=True, text=True, timeout=120, check=False,
+            **_SUBPROC_KW,
+        )
+    except subprocess.TimeoutExpired:
+        raise ConverterError("runpkr00 timed out (120s)")
+    except Exception as e:
+        raise ConverterError(f"runpkr00 failed to launch: {e}")
+
+    if not dat.exists():
+        tw = Path(tempfile.mkdtemp(prefix="runpkr_gd_", dir=str(out_dir)))
+        try:
+            alt = _runpkr00_gd_first_dat_or_tgd(runpkr00_path, inp, tw)
+            if alt is None:
+                raise ConverterError(
+                    f"runpkr00 produced no .dat/.tgd (-devg nor -g -d) ({_short_err(p1)})"
+                )
+            try:
+                shutil.copy2(alt, dat)
+            except OSError as e:
+                raise ConverterError(f"copy Trimble intermediate: {e}")
+        finally:
+            shutil.rmtree(tw, ignore_errors=True)
+
+
+def _convbin_on_dat(convbin_path: Path, dat: Path, obs_path: Path) -> None:
+    """
+    Convert runpkr00 .dat (RT17 format) → RINEX 3 obs using convbin.
+    Raises ConverterError on failure.
+    """
+    try:
+        obs_path.unlink(missing_ok=True)
+    except OSError:
+        pass
+    try:
+        p = subprocess.run(
+            [
+                str(convbin_path), "-r", "rt17",
+                str(dat),
+                "-o", str(obs_path),
+                "-v", "3.04",
+                "-os",          # include SNR
+            ],
+            cwd=str(obs_path.parent),
+            capture_output=True, text=True, timeout=180, check=False,
+            **_SUBPROC_KW,
+        )
+    except subprocess.TimeoutExpired:
+        raise ConverterError("convbin -r rt17 timed out (180s)")
+    except Exception as e:
+        raise ConverterError(f"convbin failed to launch: {e}")
+    if not (obs_path.exists() and obs_path.stat().st_size > 0):
+        raise ConverterError(f"convbin produced no non-empty obs ({_short_err(p)})")
 
 
 def _teqc_trimble_to_obs(
@@ -528,13 +701,8 @@ def _teqc_trimble_to_obs(
     eph: Optional[Path],
 ) -> None:
     """
-    Build a non-empty RINEX ``.o``. Tries several teqc argv styles seen in the wild.
-
-    - Prefer ``+obs`` + ``+nav`` when a ``.eph`` exists (-devg path).
-    - Fall back to ``teqc +obs out.o raw.dat`` (matches station-capability scrape).
-    - teqc frequently returns non-zero yet still writes a valid ``.o`` (warnings): we
-      treat non-empty ``rinex_o`` as success regardless of exit code (same pragmatic
-      rule already used for runpkr00 + ``.dat/.eph`` existence).
+    Build a non-empty RINEX .o from a .dat file using teqc.
+    Tries several argv styles. Non-empty rinex_o = success regardless of exit code.
     """
     for fp in (rinex_o, rinex_n):
         try:
@@ -544,17 +712,7 @@ def _teqc_trimble_to_obs(
 
     recipes: list[list[str]] = []
     if eph is not None and eph.exists():
-        recipes.append(
-            [
-                str(teqc_path),
-                "+obs",
-                str(rinex_o),
-                "+nav",
-                str(rinex_n),
-                str(dat),
-                str(eph),
-            ]
-        )
+        recipes.append([str(teqc_path), "+obs", str(rinex_o), "+nav", str(rinex_n), str(dat), str(eph)])
     recipes.append([str(teqc_path), "+obs", str(rinex_o), str(dat)])
     if eph is not None and eph.exists():
         recipes.append([str(teqc_path), "+obs", str(rinex_o), str(dat), str(eph)])
@@ -564,12 +722,7 @@ def _teqc_trimble_to_obs(
     for cmd in recipes:
         try:
             last_cp = subprocess.run(
-                cmd,
-                cwd=cwd,
-                capture_output=True,
-                text=True,
-                timeout=180,
-                **_SUBPROC_KW,
+                cmd, cwd=cwd, capture_output=True, text=True, timeout=180, **_SUBPROC_KW,
             )
             last_err = _short_err(last_cp)
         except subprocess.TimeoutExpired:
@@ -582,7 +735,6 @@ def _teqc_trimble_to_obs(
 
 
 def _nonempty_obs(out_dir: Path) -> Optional[Path]:
-    """Return the newest non-empty RINEX .obs / .??o file, or None."""
     candidates = list(out_dir.glob("*.obs")) + list(out_dir.glob("*.??o"))
     candidates = [c for c in candidates if c.exists() and c.stat().st_size > 0]
     if not candidates:
@@ -592,11 +744,18 @@ def _nonempty_obs(out_dir: Path) -> Optional[Path]:
 
 def convert_to_rinex(cfg: PipelineConfig, inp: Path, out_dir: Path) -> Optional[Path]:
     """
-    Convert a vendor binary (T02/T04) to RINEX. Returns the .obs path on success.
+    Convert a vendor binary (T02/T04) → RINEX obs. Returns the obs path on success.
 
-    Raises ConverterError(str) on a "real" failure so callers can record a
-    detail message. Returns None only when no converter is configured.
+    Priority order:
+      1. Custom convert_cmd_template (user-supplied)
+      2. runpkr00 → .dat → convbin -r rt17   (RINEX 3, actively maintained)
+         └─ falls back to teqc if convbin fails and teqc is available
+      3. runpkr00 → .dat → teqc              (RINEX 2, deprecated, last resort)
+      4. convbin directly on T02              (if runpkr00 unavailable)
+
+    Raises ConverterError on failure. Returns None when no converter is configured.
     """
+    # 0. Custom template
     if cfg.convert_cmd_template:
         out_dir.mkdir(parents=True, exist_ok=True)
         cmd = cfg.convert_cmd_template.format(input=str(inp), out_dir=str(out_dir))
@@ -613,82 +772,64 @@ def convert_to_rinex(cfg: PipelineConfig, inp: Path, out_dir: Path) -> Optional[
             raise ConverterError("custom convert_cmd produced no non-empty .obs")
         return obs
 
-    # Preferred path for Trimble .T02/.T04: runpkr00 -> teqc
-    if cfg.runpkr00_path and cfg.runpkr00_path.exists() and cfg.teqc_path and cfg.teqc_path.exists():
-        out_dir.mkdir(parents=True, exist_ok=True)
-        base = out_dir / _safe_stem(inp)
-        dat = Path(str(base) + ".dat")
-        eph = Path(str(base) + ".eph")
-        rinex_o = Path(str(base) + ".o")
-        rinex_n = Path(str(base) + ".n")
+    has_runpkr00 = bool(cfg.runpkr00_path and cfg.runpkr00_path.exists())
+    has_convbin  = bool(cfg.convbin_path  and cfg.convbin_path.exists())
+    has_teqc     = bool(cfg.teqc_path    and cfg.teqc_path.exists())
 
-        # Clean any leftovers from previous runs (do NOT remove rinex_o yet --
-        # we rely on its post-teqc size to detect garbage output).
-        for fp in (dat, eph, rinex_o, rinex_n):
+    # 1 & 2. runpkr00 → .dat → (convbin preferred, teqc fallback)
+    if has_runpkr00 and (has_convbin or has_teqc):
+        out_dir.mkdir(parents=True, exist_ok=True)
+        base    = out_dir / _safe_stem(inp)
+        dat     = base.with_suffix(".dat")
+        eph     = base.with_suffix(".eph")
+        obs_cb  = base.with_suffix(".obs")   # convbin output
+        obs_tq  = base.with_suffix(".o")     # teqc output
+        rinex_n = base.with_suffix(".n")
+
+        for fp in (dat, eph, obs_cb, obs_tq, rinex_n):
             try:
                 fp.unlink(missing_ok=True)
             except Exception:
                 pass
 
-        # runpkr00 sometimes returns a crash code even when it produced outputs;
-        # treat "dat+eph exist" as success.
-        run_cmd = [str(cfg.runpkr00_path), "-devg", str(inp), str(base)]
-        try:
-            p1 = subprocess.run(
-                run_cmd,
-                cwd=str(out_dir),
-                capture_output=True,
-                text=True,
-                timeout=120,
-                **_SUBPROC_KW,
-            )
-        except subprocess.TimeoutExpired:
-            raise ConverterError("runpkr00 timed out (120s)")
-        except Exception as e:
-            raise ConverterError(f"runpkr00 failed to launch: {e}")
+        # Shared step: T02 → .dat
+        _runpkr00_make_dat(cfg.runpkr00_path, inp, dat, eph, out_dir)
 
-        # If -devg did not emit .dat (common with some receivers), retry with -g -d
-        # and copy intermediate into the paths teqc expects.
-        if not dat.exists():
-            tw = Path(tempfile.mkdtemp(prefix="runpkr_gd_", dir=str(out_dir)))
+        # Preferred: convbin → RINEX 3
+        if has_convbin:
             try:
-                alt = _runpkr00_gd_first_dat_or_tgd(cfg.runpkr00_path, inp, tw)
-                if alt is None:
-                    raise ConverterError(f"runpkr00 produced no .dat/.tgd (-devg nor -g -d) ({_short_err(p1)})")
-                try:
-                    shutil.copy2(alt, dat)
-                except OSError as e:
-                    raise ConverterError(f"copy Trimble intermediate: {e}")
-            finally:
-                shutil.rmtree(tw, ignore_errors=True)
+                _convbin_on_dat(cfg.convbin_path, dat, obs_cb)
+                return obs_cb
+            except ConverterError:
+                if not has_teqc:
+                    raise
+                # convbin failed — try teqc below
 
-        elif not eph.exists():
-            # Some firmware leaves .dat but no matching .eph; teqc falls back recipes handle obs-only.
-            pass
-
+        # Fallback: teqc → RINEX 2
         eph_arg: Optional[Path] = eph if eph.exists() else None
-        try:
-            _teqc_trimble_to_obs(cfg.teqc_path, rinex_o, rinex_n, dat, eph_arg)
-        except ConverterError:
-            raise
-        return rinex_o
+        _teqc_trimble_to_obs(cfg.teqc_path, obs_tq, rinex_n, dat, eph_arg)
+        return obs_tq
 
-    if not cfg.convbin_path or not cfg.convbin_path.exists():
-        return None
-    out_dir.mkdir(parents=True, exist_ok=True)
-    cmd = [str(cfg.convbin_path), str(inp), "-od", str(out_dir), "-v", cfg.rinex_ver]
-    try:
-        p = subprocess.run(cmd, capture_output=True, text=True, timeout=180, **_SUBPROC_KW)
-    except subprocess.TimeoutExpired:
-        raise ConverterError("convbin timed out (180s)")
-    except Exception as e:
-        raise ConverterError(f"convbin failed to launch: {e}")
-    if p.returncode != 0:
-        raise ConverterError(f"convbin {_short_err(p)}")
-    obs = _nonempty_obs(out_dir)
-    if obs is None:
-        raise ConverterError("convbin produced no non-empty .obs")
-    return obs
+    # 3. convbin directly on T02 (no runpkr00)
+    if has_convbin:
+        out_dir.mkdir(parents=True, exist_ok=True)
+        obs = out_dir / (_safe_stem(inp) + ".obs")
+        try:
+            obs.unlink(missing_ok=True)
+        except OSError:
+            pass
+        cmd = [str(cfg.convbin_path), str(inp), "-o", str(obs), "-v", "3.04", "-os"]
+        try:
+            p = subprocess.run(cmd, capture_output=True, text=True, timeout=180, **_SUBPROC_KW)
+        except subprocess.TimeoutExpired:
+            raise ConverterError("convbin timed out (180s)")
+        except Exception as e:
+            raise ConverterError(f"convbin failed to launch: {e}")
+        if obs.exists() and obs.stat().st_size > 0:
+            return obs
+        raise ConverterError(f"convbin produced no non-empty obs ({_short_err(p)})")
+
+    return None
 
 
 def run_pipeline(cfg: PipelineConfig, progress_cb=None) -> Path:
@@ -697,14 +838,11 @@ def run_pipeline(cfg: PipelineConfig, progress_cb=None) -> Path:
     rinex_dir = cfg.cache_dir / "rinex"
     rinex_dir.mkdir(parents=True, exist_ok=True)
 
-    # Skip our own cache directory while scanning so we don't accidentally
-    # ingest converted/intermediate files if cache_dir lives under data_root.
     exclude = [cfg.cache_dir]
 
     conn = _db_connect(db_path)
     try:
         _db_init(conn)
-        mode = "probe" if cfg.max_files_per_station is not None else "full"
         if cfg.max_files_per_station is not None:
             files = _pick_probe_files(
                 cfg.data_root,
@@ -727,11 +865,9 @@ def run_pipeline(cfg: PipelineConfig, progress_cb=None) -> Path:
             if progress_cb:
                 progress_cb(i, total, str(p))
 
-            station = _station_from_filename(p.name)
+            station  = _station_from_filename(p.name)
             fn_date, fn_hour = _parse_filename_dt(p.name)
 
-            # Optional quick-probe mode: only try a small number of files per station,
-            # and (by default) stop after first successful conversion per station.
             if cfg.stop_after_success_per_station and station in success_by_station:
                 continue
             if cfg.max_files_per_station is not None:
@@ -739,47 +875,54 @@ def run_pipeline(cfg: PipelineConfig, progress_cb=None) -> Path:
                 if n >= cfg.max_files_per_station:
                     continue
 
-            # Robustness: do not let a single bad file crash the scan.
+            # Per-file variables — initialised here so INSERT always has values
+            # regardless of which code path (empty/cached/converted/failed) is taken.
+            interval_s:           Optional[float] = None
+            total_epochs:         int             = 0
+            expected_epochs:      Optional[int]   = None
+            completeness_pct:     Optional[float] = None
+            intra_file_gap_count: int             = 0
+            intra_file_gaps_data: list            = []
+
             try:
                 size_b, mtime = _file_sig(p)
                 if size_b <= 0:
-                    # Keep a row so the user can see "what happened" in the cache/manifests.
-                    rinex_obs = None
+                    rinex_obs      = None
                     convert_status = "skipped"
                     convert_detail = "empty or unreadable file (0 bytes or stat failed)"
                     t_first = t_last = None
                     lat = lon = h_m = None
-                    consts = sigs = None
-                    dur_s = None
-                    skipped_empty += 1
+                    consts = sigs   = None
+                    dur_s           = None
+                    skipped_empty  += 1
                 else:
-                    row = conn.execute("SELECT size_bytes, mtime FROM files WHERE path=?", (str(p),)).fetchone()
+                    row = conn.execute(
+                        "SELECT size_bytes, mtime FROM files WHERE path=?", (str(p),)
+                    ).fetchone()
                     if row and int(row["size_bytes"]) == size_b and int(row["mtime"]) == mtime:
                         cache_hits += 1
                         continue
 
-                    # Convert file into a deterministic subfolder by station
                     out_dir = rinex_dir / station
-                    rinex_obs = None
+                    rinex_obs      = None
                     convert_status = "skipped"
                     convert_detail = None
-                    has_converter = bool(
+                    has_converter  = bool(
                         cfg.convert_cmd_template
-                        or (cfg.convbin_path and cfg.convbin_path.exists())
-                        or (cfg.runpkr00_path and cfg.runpkr00_path.exists() and cfg.teqc_path and cfg.teqc_path.exists())
+                        or has_convbin_cfg(cfg)
+                        or (cfg.runpkr00_path and cfg.runpkr00_path.exists()
+                            and cfg.teqc_path  and cfg.teqc_path.exists())
                     )
                     if has_converter:
                         try:
                             rinex_obs = convert_to_rinex(cfg, p, out_dir)
                         except ConverterError as ce:
-                            rinex_obs = None
+                            rinex_obs      = None
                             convert_status = "failed"
                             convert_detail = str(ce)
                         else:
-                            if rinex_obs:
-                                convert_status = "ok"
-                            else:
-                                convert_status = "failed"
+                            convert_status = "ok" if rinex_obs else "failed"
+                            if not rinex_obs:
                                 convert_detail = "no converter configured for this file"
 
                     attempted_by_station[station] = attempted_by_station.get(station, 0) + 1
@@ -790,9 +933,10 @@ def run_pipeline(cfg: PipelineConfig, progress_cb=None) -> Path:
                     lat = lon = h_m = None
                     consts = sigs = None
                     dur_s = None
+
                     if rinex_obs and rinex_obs.exists():
-                        lines = _read_rinex_header_lines(rinex_obs)
-                        for ln in lines:
+                        hdr_lines = _read_rinex_header_lines(rinex_obs)
+                        for ln in hdr_lines:
                             if "TIME OF FIRST OBS" in ln:
                                 ts = _parse_rinex_time(ln)
                                 if ts is not None:
@@ -808,22 +952,36 @@ def run_pipeline(cfg: PipelineConfig, progress_cb=None) -> Path:
                                         lat, lon, h_m = _ecef_to_llh_wgs84(*xyz)
                                     except ZeroDivisionError:
                                         lat = lon = h_m = None
-                        consts, sigs = _parse_rinex_signals(lines)
+                        consts, sigs = _parse_rinex_signals(hdr_lines)
                         dur_s = _duration_s(t_first, t_last)
+
+                        # ── Epoch-level statistics ─────────────────────────
+                        ep = _parse_rinex_epochs(rinex_obs)
+                        interval_s           = ep.get("interval_s")
+                        total_epochs         = ep.get("total_epochs") or 0
+                        intra_file_gap_count = ep.get("intra_file_gap_count", 0)
+                        intra_file_gaps_data = ep.get("intra_file_gaps", [])
+                        if interval_s and interval_s > 0 and dur_s and dur_s > 0:
+                            expected_epochs  = max(1, round(dur_s / interval_s))
+                            completeness_pct = (
+                                min(100.0, round(total_epochs / expected_epochs * 100, 2))
+                                if expected_epochs > 0 else None
+                            )
+
             except Exception as e:
-                # Record failure for this file and continue.
-                size_b, mtime = _file_sig(p)
-                out_dir = rinex_dir / station
-                rinex_obs = None
+                size_b, mtime  = _file_sig(p)
+                rinex_obs      = None
                 convert_status = "failed"
                 convert_detail = f"{type(e).__name__}: {e}"
                 t_first = t_last = None
                 lat = lon = h_m = None
-                consts = sigs = None
-                dur_s = None
-                failed += 1
+                consts = sigs   = None
+                dur_s           = None
+                failed         += 1
+
             processed += 1
 
+            # ── Persist file row ───────────────────────────────────────────
             try:
                 conn.execute(
                     """
@@ -834,9 +992,11 @@ def run_pipeline(cfg: PipelineConfig, progress_cb=None) -> Path:
                       constellations, signals,
                       convert_status, convert_detail,
                       filename_date, filename_hour, duration_s,
+                      interval_s, total_epochs, expected_epochs,
+                      completeness_pct, intra_file_gap_count,
                       updated_at
                     )
-                    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                     ON CONFLICT(path) DO UPDATE SET
                       station=excluded.station,
                       size_bytes=excluded.size_bytes,
@@ -854,40 +1014,54 @@ def run_pipeline(cfg: PipelineConfig, progress_cb=None) -> Path:
                       filename_date=excluded.filename_date,
                       filename_hour=excluded.filename_hour,
                       duration_s=excluded.duration_s,
+                      interval_s=excluded.interval_s,
+                      total_epochs=excluded.total_epochs,
+                      expected_epochs=excluded.expected_epochs,
+                      completeness_pct=excluded.completeness_pct,
+                      intra_file_gap_count=excluded.intra_file_gap_count,
                       updated_at=excluded.updated_at
                     """,
                     (
-                        str(p),
-                        station,
-                        size_b,
-                        mtime,
+                        str(p), station, size_b, mtime,
                         str(rinex_obs) if rinex_obs else None,
-                        t_first,
-                        t_last,
-                        lat,
-                        lon,
-                        h_m,
-                        consts,
-                        sigs,
-                        convert_status,
-                        convert_detail,
-                        fn_date,
-                        fn_hour,
-                        dur_s,
+                        t_first, t_last,
+                        lat, lon, h_m,
+                        consts, sigs,
+                        convert_status, convert_detail,
+                        fn_date, fn_hour, dur_s,
+                        interval_s, total_epochs, expected_epochs,
+                        completeness_pct, intra_file_gap_count,
                         _utc_now_iso(),
                     ),
                 )
-                # Periodic commit so an unexpected crash mid-scan still leaves
-                # most rows persisted (instead of rolling back the whole batch).
                 if processed % 250 == 0:
                     try:
                         conn.commit()
                     except Exception:
                         pass
             except Exception:
-                # A single bad row (locked DB, encoding issue, etc.) must NOT
-                # abort the entire scan. Keep going.
                 failed += 1
+
+            # ── Persist intra-file gaps (best-effort — never aborts scan) ──
+            if intra_file_gaps_data:
+                try:
+                    conn.execute("DELETE FROM intra_file_gaps WHERE path=?", (str(p),))
+                    conn.executemany(
+                        """INSERT INTO intra_file_gaps
+                           (path, station, gap_start_utc, gap_end_utc, gap_epochs, gap_seconds)
+                           VALUES(?,?,?,?,?,?)""",
+                        [
+                            (
+                                str(p), station,
+                                g["gap_start_utc"], g["gap_end_utc"],
+                                g["gap_epochs"],    g["gap_seconds"],
+                            )
+                            for g in intra_file_gaps_data
+                        ],
+                    )
+                except Exception:
+                    pass
+
         try:
             conn.commit()
         except Exception:
@@ -898,15 +1072,14 @@ def run_pipeline(cfg: PipelineConfig, progress_cb=None) -> Path:
     return db_path
 
 
+def has_convbin_cfg(cfg: PipelineConfig) -> bool:
+    return bool(cfg.convbin_path and cfg.convbin_path.exists())
+
+
 def _generate_coverage_gaps(df: pd.DataFrame, out_path: Path) -> None:
     """
     Write coverage_gaps.csv: per-station contiguous blocks of missing hourly slots.
-
-    Uses ``filename_date`` + ``filename_hour`` columns (parsed from filenames).
-    Only considers the date range actually observed per station so the output
-    doesn't balloon on archives with sparse coverage.
-
-    Columns: station, gap_start_utc, gap_end_utc, gap_hours
+    Uses filename_date + filename_hour. Columns: station, gap_start_utc, gap_end_utc, gap_hours.
     """
     gap_cols = ["station", "gap_start_utc", "gap_end_utc", "gap_hours"]
     empty = pd.DataFrame(columns=gap_cols)
@@ -924,7 +1097,6 @@ def _generate_coverage_gaps(df: pd.DataFrame, out_path: Path) -> None:
     tdf["filename_date"] = tdf["filename_date"].astype(str)
     tdf["filename_hour"] = tdf["filename_hour"].astype(int)
 
-    # Build set of covered (station, date, hour) triples.
     covered: set[tuple[str, str, int]] = set(
         zip(tdf["station"], tdf["filename_date"], tdf["filename_hour"])
     )
@@ -937,53 +1109,77 @@ def _generate_coverage_gaps(df: pd.DataFrame, out_path: Path) -> None:
         except Exception:
             continue
 
-        # Iterate every hour from first to last day.
         cur = min_ts
         end = max_ts + pd.Timedelta(hours=23)
         gap_start: Optional[pd.Timestamp] = None
 
         while cur <= end:
             date_str = cur.date().isoformat()
-            hour = cur.hour
+            hour     = cur.hour
             has_file = (station, date_str, hour) in covered
             if not has_file:
                 if gap_start is None:
                     gap_start = cur
             else:
                 if gap_start is not None:
-                    gap_end = cur - pd.Timedelta(hours=1)
+                    gap_end   = cur - pd.Timedelta(hours=1)
                     gap_hours = int((cur - gap_start).total_seconds() / 3600)
                     gap_rows.append({
-                        "station": station,
+                        "station":       station,
                         "gap_start_utc": gap_start.isoformat(),
-                        "gap_end_utc": gap_end.isoformat(),
-                        "gap_hours": gap_hours,
+                        "gap_end_utc":   gap_end.isoformat(),
+                        "gap_hours":     gap_hours,
                     })
                     gap_start = None
             cur += pd.Timedelta(hours=1)
 
-        # Close any gap still open at the end of the range.
         if gap_start is not None:
-            gap_end = end
+            gap_end   = end
             gap_hours = int((end - gap_start).total_seconds() / 3600) + 1
             gap_rows.append({
-                "station": station,
+                "station":       station,
                 "gap_start_utc": gap_start.isoformat(),
-                "gap_end_utc": gap_end.isoformat(),
-                "gap_hours": gap_hours,
+                "gap_end_utc":   gap_end.isoformat(),
+                "gap_hours":     gap_hours,
             })
 
     result = pd.DataFrame(gap_rows, columns=gap_cols) if gap_rows else empty
     result.to_csv(out_path, index=False)
 
 
+def _export_intra_file_gaps(db_path: Path, out_path: Path) -> None:
+    """Export intra_file_gaps table → CSV. Always writes the file (empty if no gaps)."""
+    cols = ["file_name", "station", "gap_start_utc", "gap_end_utc", "gap_epochs", "gap_seconds"]
+    conn = _db_connect(db_path)
+    try:
+        rows = conn.execute(
+            """SELECT path, station, gap_start_utc, gap_end_utc, gap_epochs, gap_seconds
+               FROM intra_file_gaps
+               ORDER BY station, gap_start_utc"""
+        ).fetchall()
+        df = pd.DataFrame([dict(r) for r in rows])
+    finally:
+        conn.close()
+
+    if df.empty:
+        pd.DataFrame(columns=cols).to_csv(out_path, index=False)
+        return
+
+    df["file_name"] = df["path"].astype(str).map(lambda s: Path(s).name)
+    df.drop(columns=["path"], inplace=True)
+    df = df[cols]
+    df.to_csv(out_path, index=False)
+
+
 def export_manifests(db_path: Path, out_dir: Path) -> Path:
     """
-    Export scan cache SQLite into the existing manifests format expected by dashboard.py:
+    Export scan cache SQLite into manifests expected by dashboard.py:
       _manifests/files_manifest.csv
+      _manifests/coverage_gaps.csv
+      _manifests/intra_file_gaps.csv
       _manifests/summary.json
     """
-    out_dir = out_dir.resolve()
+    out_dir  = out_dir.resolve()
     manifests = out_dir / "_manifests"
     manifests.mkdir(parents=True, exist_ok=True)
 
@@ -993,24 +1189,29 @@ def export_manifests(db_path: Path, out_dir: Path) -> Path:
             """
             SELECT
               station,
-              station as prefix,
-              path as file_name,
+              station                              AS prefix,
+              path                                 AS file_name,
               size_bytes,
-              datetime(mtime, 'unixepoch') as modified_utc,
-              path as discovered_from,
-              filename_date as inferred_date,
+              datetime(mtime, 'unixepoch')         AS modified_utc,
+              path                                 AS discovered_from,
+              filename_date                        AS inferred_date,
               filename_hour,
               duration_s,
-              NULL as rinex_version,
-              NULL as rinex_file_type,
+              interval_s,
+              total_epochs,
+              expected_epochs,
+              completeness_pct,
+              intra_file_gap_count,
+              NULL                                 AS rinex_version,
+              NULL                                 AS rinex_file_type,
               constellations,
               signals,
               lat,
               lon,
               height_m,
-              NULL as ecef_x,
-              NULL as ecef_y,
-              NULL as ecef_z
+              NULL                                 AS ecef_x,
+              NULL                                 AS ecef_y,
+              NULL                                 AS ecef_z
             FROM files
             """
         ).fetchall()
@@ -1018,66 +1219,63 @@ def export_manifests(db_path: Path, out_dir: Path) -> Path:
     finally:
         conn.close()
 
-    # Normalize to the schema expected by dashboard.py.
-    # NOTE: previous implementation used SQL `substr(path, instr(path, '.'))` to
-    # derive `ext`, which returns the substring from the FIRST dot. On Windows
-    # paths like  C:\my.folder\STATION1234.T02  that produces ".folder\station1234.t02"
-    # instead of ".t02", which then poisons the dashboard's extension filter.
-    # Compute ext in Python from the file name so we always get the true suffix.
+    expected_cols = [
+        "station", "prefix", "file_name", "ext", "size_bytes", "modified_utc",
+        "discovered_from", "inferred_date", "filename_hour", "duration_s",
+        "interval_s", "total_epochs", "expected_epochs", "completeness_pct",
+        "intra_file_gap_count",
+        "rinex_version", "rinex_file_type",
+        "constellations", "signals", "lat", "lon", "height_m",
+        "ecef_x", "ecef_y", "ecef_z",
+    ]
     if df.empty:
-        # Make sure all expected columns exist even on empty DB so downstream
-        # code (and the dashboard) doesn't KeyError on the first column access.
-        expected_cols = [
-            "station", "prefix", "file_name", "ext", "size_bytes", "modified_utc",
-            "discovered_from", "inferred_date", "filename_hour", "duration_s",
-            "rinex_version", "rinex_file_type",
-            "constellations", "signals", "lat", "lon", "height_m",
-            "ecef_x", "ecef_y", "ecef_z",
-        ]
         df = pd.DataFrame({c: pd.Series(dtype="object") for c in expected_cols})
     else:
-        df["file_name"] = df["file_name"].astype(str).map(lambda s: Path(s).name)
+        df["file_name"]       = df["file_name"].astype(str).map(lambda s: Path(s).name)
         df["discovered_from"] = df["discovered_from"].astype(str).map(lambda s: str(Path(s).parent))
-        df["ext"] = df["file_name"].map(lambda s: Path(s).suffix.lower())
+        df["ext"]             = df["file_name"].map(lambda s: Path(s).suffix.lower())
 
     csv_path = manifests / "files_manifest.csv"
     df.to_csv(csv_path, index=False)
 
-    _generate_coverage_gaps(df, manifests / "coverage_gaps.csv")
+    gaps_csv        = manifests / "coverage_gaps.csv"
+    intra_gaps_csv  = manifests / "intra_file_gaps.csv"
+    _generate_coverage_gaps(df, gaps_csv)
+    _export_intra_file_gaps(db_path, intra_gaps_csv)
 
     if df.empty:
-        by_station: dict = {}
-        by_ext: dict = {}
-        total_bytes = 0
-        unique_prefixes = 0
-        unique_exts = 0
+        by_station = {}
+        by_ext     = {}
+        total_bytes        = 0
+        unique_prefixes    = 0
+        unique_exts        = 0
     else:
-        by_station = df["station"].value_counts().to_dict()
-        by_ext = df["ext"].value_counts().to_dict() if "ext" in df.columns else {}
-        total_bytes = int(df["size_bytes"].fillna(0).sum()) if "size_bytes" in df.columns else 0
+        by_station   = df["station"].value_counts().to_dict()
+        by_ext       = df["ext"].value_counts().to_dict() if "ext" in df.columns else {}
+        total_bytes  = int(df["size_bytes"].fillna(0).sum()) if "size_bytes" in df.columns else 0
         unique_prefixes = int(df["station"].nunique())
-        unique_exts = int(df["ext"].nunique()) if "ext" in df.columns else 0
+        unique_exts  = int(df["ext"].nunique()) if "ext" in df.columns else 0
 
     summary = {
-        "paths_checked": int(len(df)),
-        "files_in_manifest": int(len(df)),
-        "total_bytes": total_bytes,
-        "unique_prefixes": unique_prefixes,
-        "unique_exts": unique_exts,
+        "paths_checked":       int(len(df)),
+        "files_in_manifest":   int(len(df)),
+        "total_bytes":         total_bytes,
+        "unique_prefixes":     unique_prefixes,
+        "unique_exts":         unique_exts,
         "by_constellation_counts": {},
-        "by_ext_counts": by_ext,
-        "by_prefix_counts": {str(k).lower(): int(v) for k, v in by_station.items()},
-        "generated_utc": _utc_now_iso(),
-        "root": str(out_dir),
-        "out_dir": str(out_dir),
-        "manifests_dir": str(manifests),
-        "include_ext": sorted(list(TO_EXTS)),
-        "exclude_ext": None,
-        "prefix_regex": STATION_RE.pattern,
+        "by_ext_counts":       by_ext,
+        "by_prefix_counts":    {str(k).lower(): int(v) for k, v in by_station.items()},
+        "generated_utc":       _utc_now_iso(),
+        "root":                str(out_dir),
+        "out_dir":             str(out_dir),
+        "manifests_dir":       str(manifests),
+        "include_ext":         sorted(list(TO_EXTS)),
+        "exclude_ext":         None,
+        "prefix_regex":        STATION_RE.pattern,
         "parse_rinex_headers": True,
-        "source": str(db_path),
-        "coverage_gaps_csv": str(manifests / "coverage_gaps.csv"),
+        "source":              str(db_path),
+        "coverage_gaps_csv":   str(gaps_csv),
+        "intra_file_gaps_csv": str(intra_gaps_csv),
     }
     (manifests / "summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
     return manifests
-
