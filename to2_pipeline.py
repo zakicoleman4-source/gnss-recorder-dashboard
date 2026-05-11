@@ -28,7 +28,6 @@ class PipelineConfig:
     cache_dir: Path
     convbin_path: Optional[Path] = None
     runpkr00_path: Optional[Path] = None
-    teqc_path: Optional[Path] = None
     rinex_ver: str = "3.04"
     max_files_per_station: Optional[int] = None
     stop_after_success_per_station: bool = False
@@ -696,46 +695,6 @@ def _convbin_on_dat(convbin_path: Path, dat: Path, obs_path: Path) -> None:
         raise ConverterError(f"convbin produced no non-empty obs ({_short_err(p)})")
 
 
-def _teqc_trimble_to_obs(
-    teqc_path: Path,
-    rinex_o: Path,
-    rinex_n: Path,
-    dat: Path,
-    eph: Optional[Path],
-) -> None:
-    """
-    Build a non-empty RINEX .o from a .dat file using teqc.
-    Tries several argv styles. Non-empty rinex_o = success regardless of exit code.
-    """
-    for fp in (rinex_o, rinex_n):
-        try:
-            fp.unlink(missing_ok=True)
-        except OSError:
-            pass
-
-    recipes: list[list[str]] = []
-    if eph is not None and eph.exists():
-        recipes.append([str(teqc_path), "+obs", str(rinex_o), "+nav", str(rinex_n), str(dat), str(eph)])
-    recipes.append([str(teqc_path), "+obs", str(rinex_o), str(dat)])
-    if eph is not None and eph.exists():
-        recipes.append([str(teqc_path), "+obs", str(rinex_o), str(dat), str(eph)])
-
-    cwd = str(rinex_o.parent)
-    last_err = "no subprocess result"
-    for cmd in recipes:
-        try:
-            last_cp = subprocess.run(
-                cmd, cwd=cwd, capture_output=True, text=True, timeout=180, **_SUBPROC_KW,
-            )
-            last_err = _short_err(last_cp)
-        except subprocess.TimeoutExpired:
-            raise ConverterError("teqc timed out (180s)")
-        except Exception as e:
-            raise ConverterError(f"teqc failed to launch: {e}")
-        if rinex_o.exists() and rinex_o.stat().st_size > 0:
-            return
-    raise ConverterError(f"teqc produced no non-empty .o ({last_err})")
-
 
 def _nonempty_obs(out_dir: Path) -> Optional[Path]:
     candidates = list(out_dir.glob("*.obs")) + list(out_dir.glob("*.??o"))
@@ -747,14 +706,11 @@ def _nonempty_obs(out_dir: Path) -> Optional[Path]:
 
 def convert_to_rinex(cfg: PipelineConfig, inp: Path, out_dir: Path) -> Optional[Path]:
     """
-    Convert a vendor binary (T02/T04) → RINEX obs. Returns the obs path on success.
+    Convert a vendor binary (T02/T04) → RINEX 3 obs. Returns the obs path on success.
 
-    Priority order:
+    Priority:
       1. Custom convert_cmd_template (user-supplied)
-      2. runpkr00 → .dat → convbin -r rt17   (RINEX 3, actively maintained)
-         └─ falls back to teqc if convbin fails and teqc is available
-      3. runpkr00 → .dat → teqc              (RINEX 2, deprecated, last resort)
-      4. convbin directly on T02              (if runpkr00 unavailable)
+      2. runpkr00 → .dat (RT17) → convbin -r rt17 → RINEX 3
 
     Raises ConverterError on failure. Returns None when no converter is configured.
     """
@@ -775,62 +731,26 @@ def convert_to_rinex(cfg: PipelineConfig, inp: Path, out_dir: Path) -> Optional[
             raise ConverterError("custom convert_cmd produced no non-empty .obs")
         return obs
 
+    # 1. runpkr00 → .dat → convbin -r rt17
     has_runpkr00 = bool(cfg.runpkr00_path and cfg.runpkr00_path.exists())
     has_convbin  = bool(cfg.convbin_path  and cfg.convbin_path.exists())
-    has_teqc     = bool(cfg.teqc_path    and cfg.teqc_path.exists())
 
-    # 1 & 2. runpkr00 → .dat → (convbin preferred, teqc fallback)
-    if has_runpkr00 and (has_convbin or has_teqc):
+    if has_runpkr00 and has_convbin:
         out_dir.mkdir(parents=True, exist_ok=True)
-        base    = out_dir / _safe_stem(inp)
-        dat     = base.with_suffix(".dat")
-        eph     = base.with_suffix(".eph")
-        obs_cb  = base.with_suffix(".obs")   # convbin output
-        obs_tq  = base.with_suffix(".o")     # teqc output
-        rinex_n = base.with_suffix(".n")
+        base   = out_dir / _safe_stem(inp)
+        dat    = base.with_suffix(".dat")
+        eph    = base.with_suffix(".eph")
+        obs_cb = base.with_suffix(".obs")
 
-        for fp in (dat, eph, obs_cb, obs_tq, rinex_n):
+        for fp in (dat, eph, obs_cb):
             try:
                 fp.unlink(missing_ok=True)
             except Exception:
                 pass
 
-        # Shared step: T02 → .dat
         _runpkr00_make_dat(cfg.runpkr00_path, inp, dat, eph, out_dir)
-
-        # Preferred: convbin → RINEX 3
-        if has_convbin:
-            try:
-                _convbin_on_dat(cfg.convbin_path, dat, obs_cb)
-                return obs_cb
-            except ConverterError:
-                if not has_teqc:
-                    raise
-                # convbin failed — try teqc below
-
-        # Fallback: teqc → RINEX 2
-        eph_arg: Optional[Path] = eph if eph.exists() else None
-        _teqc_trimble_to_obs(cfg.teqc_path, obs_tq, rinex_n, dat, eph_arg)
-        return obs_tq
-
-    # 3. convbin directly on T02 (no runpkr00)
-    if has_convbin:
-        out_dir.mkdir(parents=True, exist_ok=True)
-        obs = out_dir / (_safe_stem(inp) + ".obs")
-        try:
-            obs.unlink(missing_ok=True)
-        except OSError:
-            pass
-        cmd = [str(cfg.convbin_path), str(inp), "-o", str(obs), "-v", "3.04", "-os"]
-        try:
-            p = subprocess.run(cmd, capture_output=True, text=True, timeout=180, **_SUBPROC_KW)
-        except subprocess.TimeoutExpired:
-            raise ConverterError("convbin timed out (180s)")
-        except Exception as e:
-            raise ConverterError(f"convbin failed to launch: {e}")
-        if obs.exists() and obs.stat().st_size > 0:
-            return obs
-        raise ConverterError(f"convbin produced no non-empty obs ({_short_err(p)})")
+        _convbin_on_dat(cfg.convbin_path, dat, obs_cb)
+        return obs_cb
 
     return None
 
@@ -912,9 +832,8 @@ def run_pipeline(cfg: PipelineConfig, progress_cb=None) -> Path:
                     convert_detail = None
                     has_converter  = bool(
                         cfg.convert_cmd_template
-                        or has_convbin_cfg(cfg)
                         or (cfg.runpkr00_path and cfg.runpkr00_path.exists()
-                            and cfg.teqc_path  and cfg.teqc_path.exists())
+                            and has_convbin_cfg(cfg))
                     )
                     if has_converter:
                         try:

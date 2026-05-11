@@ -3,10 +3,10 @@ setlocal enabledelayedexpansion
 
 set HERE=%~dp0
 set ROOT=%HERE%..\..
-set VENV=%ROOT%\.venv_offline
+set VENV=%ROOT%\.venv_gnss
 
 if not exist "%VENV%\Scripts\python.exe" (
-  echo [gnss] ERROR: Offline venv not found: %VENV%
+  echo [gnss] ERROR: venv not found: %VENV%
   echo [gnss] Run INSTALL_OFFLINE.bat first.
   echo.
   echo Press any key to close this window...
@@ -31,12 +31,7 @@ if not exist "%STREAMLIT_CFG_DIR%\credentials.toml" (
   >> "%STREAMLIT_CFG_DIR%\credentials.toml" echo email = ""
 )
 
-REM If teqc is bundled with the app, use it automatically (no user setup).
-if exist "%ROOT%\gnss-recorder-dashboard\tools\teqc\teqc.exe" (
-  set "GNSS_TEQC=%ROOT%\gnss-recorder-dashboard\tools\teqc\teqc.exe"
-)
-
-REM Same for runpkr00 -- the dashboard reads GNSS_RUNPKR00 to pre-fill the
+REM runpkr00 -- the dashboard reads GNSS_RUNPKR00 to pre-fill the
 REM tool path in the UI, saving the operator from typing it manually.
 if exist "%ROOT%\gnss-recorder-dashboard\tools\runpkr00\runpkr00.exe" (
   set "GNSS_RUNPKR00=%ROOT%\gnss-recorder-dashboard\tools\runpkr00\runpkr00.exe"
