@@ -431,13 +431,16 @@ def _db_init(conn: sqlite3.Connection) -> None:
 
 
 def _read_rinex_header_lines(path: Path, max_bytes: int = 256 * 1024) -> list[str]:
-    lines: list[str] = []
-    with path.open("rb") as f:
-        data = f.read(max_bytes)
+    try:
+        with path.open("rb") as f:
+            data = f.read(max_bytes)
+    except OSError:
+        return []
     try:
         text = data.decode("ascii", errors="ignore")
     except Exception:
         text = ""
+    lines: list[str] = []
     for ln in text.splitlines():
         lines.append(ln.rstrip("\r\n"))
         if "END OF HEADER" in ln:

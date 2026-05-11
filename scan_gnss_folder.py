@@ -359,10 +359,13 @@ def _parse_rinex_from_path(path: Path, max_header_bytes: int = 128 * 1024) -> Tu
                 # fallback: anything that's not huge directory
                 candidates = preferred or [n for n in members if not n.endswith("/")]
                 for n in candidates[:10]:
-                    with z.open(n, "r") as f:
-                        lines = _read_text_header_from_fileobj(f, max_header_bytes)
-                    if lines and _has_rinex_version_line(lines):
-                        return _parse_rinex_header_lines(lines)
+                    try:
+                        with z.open(n, "r") as f:
+                            lines = _read_text_header_from_fileobj(f, max_header_bytes)
+                        if lines and _has_rinex_version_line(lines):
+                            return _parse_rinex_header_lines(lines)
+                    except Exception:
+                        continue
             return None, None, set(), set()
 
         # Plain file (might still be RINEX)

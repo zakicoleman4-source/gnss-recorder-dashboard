@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import datetime as _dt
 import io
 import json
 import math
@@ -23,6 +24,27 @@ import streamlit as st
 _THIS_DIR = Path(__file__).resolve().parent
 if str(_THIS_DIR) not in sys.path:
     sys.path.insert(0, str(_THIS_DIR))
+
+
+def _safe_min_date(series: "pd.Series", fallback: "_dt.date | None" = None) -> "_dt.date":
+    """Return series.min().date(), or today (or fallback) when all-NaT / empty."""
+    try:
+        v = series.min()
+        if v is pd.NaT or pd.isna(v):
+            return fallback or _dt.date.today()
+        return v.date()
+    except Exception:
+        return fallback or _dt.date.today()
+
+
+def _safe_max_date(series: "pd.Series", fallback: "_dt.date | None" = None) -> "_dt.date":
+    try:
+        v = series.max()
+        if v is pd.NaT or pd.isna(v):
+            return fallback or _dt.date.today()
+        return v.date()
+    except Exception:
+        return fallback or _dt.date.today()
 
 
 st.set_page_config(page_title="GNSS Recorder Dashboard", layout="wide")
@@ -1015,8 +1037,19 @@ with st.spinner("Inferring event timestamps..."):
 df["event_hour_utc"] = df["event_ts_utc"].dt.floor("h")
 
 # Prefer robust station inference if present in manifest.
-station_col = "station" if "station" in df.columns else "prefix"
+if "station" in df.columns:
+    station_col = "station"
+elif "prefix" in df.columns:
+    station_col = "prefix"
+else:
+    df["station"] = "UNKNOWN"
+    station_col = "station"
 df[station_col] = _normalize_station_id_series(df[station_col])
+
+# Ensure columns that tabs depend on always exist (older manifests may omit them).
+for _req_col, _req_default in [("ext", ""), ("file_name", ""), ("size_bytes", 0)]:
+    if _req_col not in df.columns:
+        df[_req_col] = _req_default
 
 # If lat/lon are missing (common for T02/T04-only datasets), best-effort enrich from GeoNet.
 # Suppress retries for the rest of the session if we already failed once -- otherwise
@@ -1146,8 +1179,8 @@ with _safe_tab("Overview", tab_overview):
 
     st.markdown("### Data health insights")
     # Pick a lightweight default time window for fast, high-signal analysis.
-    min_day = df["event_ts_utc"].min().date()
-    max_day = df["event_ts_utc"].max().date()
+    min_day = _safe_min_date(df["event_ts_utc"])
+    max_day = _safe_max_date(df["event_ts_utc"])
     o1, o2, o3 = st.columns([2, 2, 2])
     health_start = o1.date_input("Health window start", value=min_day, min_value=min_day, max_value=max_day, key="health_start")
     health_end = o2.date_input("Health window end", value=max_day, min_value=min_day, max_value=max_day, key="health_end")
@@ -1612,8 +1645,8 @@ with _safe_tab("VRS", tab_vrs):
         raise _SkipTab()
 
     # Date range + expected schedule
-    min_day = vdf["event_ts_utc"].min().date()
-    max_day = vdf["event_ts_utc"].max().date()
+    min_day = _safe_min_date(vdf["event_ts_utc"])
+    max_day = _safe_max_date(vdf["event_ts_utc"])
     d1, d2, d3 = st.columns([2, 2, 2])
     start_day = d1.date_input("Start day", value=min_day, min_value=min_day, max_value=max_day, key="vrs_start")
     end_day = d2.date_input("End day", value=max_day, min_value=min_day, max_value=max_day, key="vrs_end")
@@ -1722,8 +1755,8 @@ with _safe_tab("Map", tab_map):
         raise _SkipTab()
 
     # Day selection from available timestamps
-    day_min = mdf["event_ts_utc"].min().date()
-    day_max = mdf["event_ts_utc"].max().date()
+    day_min = _safe_min_date(mdf["event_ts_utc"])
+    day_max = _safe_max_date(mdf["event_ts_utc"])
     c1, c2, c3 = st.columns([2, 2, 2])
     day = c1.date_input("Day", value=day_max, min_value=day_min, max_value=day_max)
     expected_mode_map = c2.selectbox("Expected schedule (map)", options=["24/7", "Business hours"], index=0)
