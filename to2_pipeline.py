@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import re
 import shutil
@@ -1077,6 +1078,6 @@ def export_manifests(db_path: Path, out_dir: Path) -> Path:
         "source": str(db_path),
         "coverage_gaps_csv": str(manifests / "coverage_gaps.csv"),
     }
-    (manifests / "summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")  # type: ignore[name-defined]
+    (manifests / "summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
     return manifests
 
