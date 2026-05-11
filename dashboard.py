@@ -653,23 +653,33 @@ with st.sidebar:
         data_root = Path(_clean_path_input(st.text_input("Data folder to scan", value=os.environ.get("GNSS_DATA_ROOT", "")))).expanduser()
         cache_dir = Path(_clean_path_input(st.text_input("Cache folder", value=os.environ.get("GNSS_CACHE_DIR", str(Path.home() / ".gnss_dash_cache"))))).expanduser()
 
-        runpkr_default = str((Path(__file__).resolve().parent / "tools" / "runpkr00" / "runpkr00.exe"))
-        runpkr_path = Path(_clean_path_input(st.text_input("runpkr00.exe (recommended for .T02/.T04)", value=os.environ.get("GNSS_RUNPKR00", runpkr_default)))).expanduser()
+        _tools = Path(__file__).resolve().parent / "tools"
+        runpkr_default = str(_tools / "runpkr00" / "runpkr00.exe")
+        convbin_default = str(_tools / "rtklib" / "convbin.exe")
+        rnx2rtkp_default = str(_tools / "rtklib" / "rnx2rtkp.exe")
 
-        teqc_bundled = str((Path(__file__).resolve().parent / "tools" / "teqc" / "teqc.exe"))
-        teqc_default = os.environ.get("GNSS_TEQC", teqc_bundled)
-        teqc_path = Path(_clean_path_input(st.text_input("teqc.exe (recommended for .T02/.T04)", value=teqc_default))).expanduser()
+        runpkr_path    = Path(_clean_path_input(st.text_input(
+            "runpkr00.exe", value=os.environ.get("GNSS_RUNPKR00", runpkr_default),
+            help="Trimble unpacker. Required for T02/T04 conversion."))).expanduser()
+        convbin_path   = Path(_clean_path_input(st.text_input(
+            "convbin.exe (RTKLIB)", value=os.environ.get("GNSS_CONVBIN", convbin_default),
+            help="RTKLIB converter. Required alongside runpkr00 for T02/T04 → RINEX 3."))).expanduser()
+        rnx2rtkp_path  = Path(_clean_path_input(st.text_input(
+            "rnx2rtkp.exe (optional — coordinate solving)", value=os.environ.get("GNSS_RNX2RTKP", rnx2rtkp_default),
+            help="RTKLIB SPP solver. If present, automatically computes station coordinates for files missing APPROX POSITION XYZ in the RINEX header."))).expanduser()
+        station_coords_input = _clean_path_input(st.text_input(
+            "station_coords.csv (optional)", value="",
+            help="CSV with columns: station,lat,lon,height_m. Overrides or supplements auto-solved coordinates."))
+        station_coords_path = Path(station_coords_input).expanduser() if station_coords_input.strip() else None
 
-        convbin_default = str((Path(__file__).resolve().parent / "tools" / "rtklib" / "convbin.exe"))
-        convbin_path = Path(_clean_path_input(st.text_input("convbin.exe (optional)", value=os.environ.get("GNSS_CONVBIN", convbin_default)))).expanduser()
-        use_trimble = st.checkbox(
-            "Convert TO2/T02 to RINEX (recommended: runpkr00 + teqc)",
-            value=runpkr_path.exists() and teqc_path.exists(),
+        can_convert = runpkr_path.exists() and convbin_path.exists()
+        use_convert = st.checkbox(
+            "Convert T02/T04 → RINEX 3 (runpkr00 + convbin)",
+            value=can_convert,
+            help="Requires both runpkr00.exe and convbin.exe. Enables epoch stats, constellation tracking, and coordinate extraction.",
         )
-        use_convbin = st.checkbox(
-            "Convert TO2/T02 to RINEX (fallback: RTKLIB convbin.exe)",
-            value=(not use_trimble) and convbin_path.exists(),
-        )
+        if use_convert and not can_convert:
+            st.warning("runpkr00.exe or convbin.exe not found at the paths above. Conversion disabled.")
 
         quick_probe = st.checkbox(
             "Quick probe (1 file per station) — fastest for coords/signals",
@@ -786,13 +796,13 @@ with st.sidebar:
         cfg = PipelineConfig(
             data_root=data_root.resolve(),
             cache_dir=cache_dir.resolve(),
-            convbin_path=convbin_path.resolve() if use_convbin and convbin_path.exists() else None,
-            runpkr00_path=runpkr_path.resolve() if use_trimble and runpkr_path.exists() else None,
-            teqc_path=teqc_path.resolve() if use_trimble and teqc_path.exists() else None,
+            runpkr00_path=runpkr_path.resolve() if use_convert and runpkr_path.exists() else None,
+            convbin_path=convbin_path.resolve() if use_convert and convbin_path.exists() else None,
+            rnx2rtkp_path=rnx2rtkp_path.resolve() if rnx2rtkp_path.exists() else None,
+            station_coords_path=station_coords_path.resolve() if station_coords_path and station_coords_path.exists() else None,
             max_files_per_station=1 if quick_probe else None,
-            # IMPORTANT:
-            # - Probe mode: stop after first successful conversion per station (fast station metadata).
-            # - Full scan: do NOT stop early, otherwise it silently "skips" most files per station.
+            # Probe: stop after first success per station (fast metadata).
+            # Full: process every file (coverage stats need all files).
             stop_after_success_per_station=bool(quick_probe),
             convert_cmd_template=os.environ.get("GNSS_CONVERT_CMD") or None,
         )
