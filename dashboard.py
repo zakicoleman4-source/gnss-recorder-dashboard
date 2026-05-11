@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import datetime as _dt
 import io
@@ -263,16 +263,14 @@ def _haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     return 2 * r * math.asin(math.sqrt(a))
 
 
-def _extract_runpkr00_inventory(signals_series: pd.Series) -> pd.DataFrame:
+@st.cache_data(show_spinner=False)
+def _extract_runpkr00_inventory(signals_tuple: tuple) -> pd.DataFrame:
     """
-    Extract receiver inventory fields from the `signals` column produced by the scanner for T02/T04:
-    - RECEIVER:<model>
-    - FW:<firmware>
-    - SN:<serial>
-    - RX:<id>
+    Extract receiver inventory fields from the `signals` column produced by the scanner for T02/T04.
+    Accepts a tuple of raw signal strings (hashable for st.cache_data).
     """
     rows = []
-    for raw in signals_series.dropna().astype(str).tolist():
+    for raw in signals_tuple:
         items = [x.strip() for x in raw.split(",") if x.strip()]
         rec = {"receiver": None, "fw": None, "sn": None, "rx": None}
         for it in items:
@@ -476,24 +474,25 @@ def _download_and_extract_manifests_zip(url: str) -> Path:
 
 
 @st.cache_data(show_spinner=False)
-def _geonet_station_coords(stations: tuple[str, ...], network: str = "NZ") -> pd.DataFrame:
+def _geonet_station_coords(stations: "tuple[str, ...]", network: str = "NZ") -> pd.DataFrame:
     """
     Best-effort fetch of station coords from GeoNet FDSN station service (text format).
     Returns columns: station, lat, lon, site_name
 
-    Batched in groups of 50 stations so we don't build a giant URL that some
-    proxies/servers reject with 414 URI Too Long. Each batch has its own short
-    timeout so a single slow batch doesn't freeze the whole UI.
+    Batched in groups of 50 stations. Batches run in parallel (ThreadPoolExecutor)
+    so the total wall time is one round-trip (~4 s) regardless of station count.
     """
+    import concurrent.futures as _cf
+
     if not stations:
         return pd.DataFrame(columns=["station", "lat", "lon", "site_name"])
 
     url = "https://service.geonet.org.nz/fdsnws/station/1/query"
     uniq = sorted(set(s for s in stations if s))
     batch_size = 50
-    all_rows: list[dict] = []
-    for i in range(0, len(uniq), batch_size):
-        batch = uniq[i : i + batch_size]
+    batches = [uniq[i: i + batch_size] for i in range(0, len(uniq), batch_size)]
+
+    def _fetch_batch(batch: list) -> list:
         params = {
             "network": network,
             "station": ",".join(batch),
@@ -501,11 +500,11 @@ def _geonet_station_coords(stations: tuple[str, ...], network: str = "NZ") -> pd
             "format": "text",
         }
         try:
-            r = requests.get(url, params=params, timeout=4)
+            r = requests.get(url, params=params, timeout=8)
             r.raise_for_status()
         except Exception:
-            # One batch failing should not throw away the others.
-            continue
+            return []
+        rows = []
         for line in r.text.splitlines():
             line = line.strip()
             if not line or line.startswith("#"):
@@ -515,17 +514,22 @@ def _geonet_station_coords(stations: tuple[str, ...], network: str = "NZ") -> pd
                 continue
             _net, sta, lat, lon, _elev, site = parts[:6]
             try:
-                all_rows.append(
-                    {
-                        "station": str(sta).strip().lower(),
-                        "lat": float(lat),
-                        "lon": float(lon),
-                        "site_name": str(site).strip(),
-                    }
-                )
+                rows.append({
+                    "station": str(sta).strip().lower(),
+                    "lat": float(lat),
+                    "lon": float(lon),
+                    "site_name": str(site).strip(),
+                })
             except Exception:
                 continue
-    return pd.DataFrame(all_rows)
+        return rows
+
+    all_rows: list = []
+    with _cf.ThreadPoolExecutor(max_workers=min(8, len(batches))) as pool:
+        for batch_rows in pool.map(_fetch_batch, batches):
+            all_rows.extend(batch_rows)
+
+    return pd.DataFrame(all_rows) if all_rows else pd.DataFrame(columns=["station", "lat", "lon", "site_name"])
 
 
 def _manifest_to_sqlite(df: pd.DataFrame, out_path: Path) -> None:
@@ -658,18 +662,26 @@ with st.sidebar:
         convbin_default = str(_tools / "rtklib" / "convbin.exe")
         rnx2rtkp_default = str(_tools / "rtklib" / "rnx2rtkp.exe")
 
-        runpkr_path    = Path(_clean_path_input(st.text_input(
-            "runpkr00.exe", value=os.environ.get("GNSS_RUNPKR00", runpkr_default),
-            help="Trimble unpacker. Required for T02/T04 conversion."))).expanduser()
-        convbin_path   = Path(_clean_path_input(st.text_input(
-            "convbin.exe (RTKLIB)", value=os.environ.get("GNSS_CONVBIN", convbin_default),
-            help="RTKLIB converter. Required alongside runpkr00 for T02/T04 → RINEX 3."))).expanduser()
-        rnx2rtkp_path  = Path(_clean_path_input(st.text_input(
-            "rnx2rtkp.exe (optional — coordinate solving)", value=os.environ.get("GNSS_RNX2RTKP", rnx2rtkp_default),
-            help="RTKLIB SPP solver. If present, automatically computes station coordinates for files missing APPROX POSITION XYZ in the RINEX header."))).expanduser()
-        station_coords_input = _clean_path_input(st.text_input(
-            "station_coords.csv (optional)", value="",
-            help="CSV with columns: station,lat,lon,height_m. Overrides or supplements auto-solved coordinates."))
+        # Auto-detect converter availability before the expander so the checkbox
+        # below can default correctly without requiring the user to open it.
+        _runpkr_env = os.environ.get("GNSS_RUNPKR00", runpkr_default)
+        _convbin_env = os.environ.get("GNSS_CONVBIN", convbin_default)
+        _rnx2rtkp_env = os.environ.get("GNSS_RNX2RTKP", rnx2rtkp_default)
+        can_convert_default = Path(_runpkr_env).exists() and Path(_convbin_env).exists()
+
+        with st.expander("Converter & coordinate tool paths", expanded=not can_convert_default):
+            runpkr_path = Path(_clean_path_input(st.text_input(
+                "runpkr00.exe", value=_runpkr_env,
+                help="Trimble unpacker. Required for T02/T04 conversion."))).expanduser()
+            convbin_path = Path(_clean_path_input(st.text_input(
+                "convbin.exe (RTKLIB)", value=_convbin_env,
+                help="RTKLIB converter. Required alongside runpkr00 for T02/T04 → RINEX 3."))).expanduser()
+            rnx2rtkp_path = Path(_clean_path_input(st.text_input(
+                "rnx2rtkp.exe (optional — coordinate solving)", value=_rnx2rtkp_env,
+                help="RTKLIB SPP solver. Computes station coordinates when APPROX POSITION XYZ is absent from the RINEX header."))).expanduser()
+            station_coords_input = _clean_path_input(st.text_input(
+                "station_coords.csv (optional)", value="",
+                help="CSV with columns: station,lat,lon,height_m. Overrides or supplements auto-solved coordinates."))
         station_coords_path = Path(station_coords_input).expanduser() if station_coords_input.strip() else None
 
         can_convert = runpkr_path.exists() and convbin_path.exists()
@@ -732,12 +744,17 @@ with st.sidebar:
                 )
             elif candidate and manifests_ok and not keys_match:
                 st.warning(
-                    "Manifests from an earlier scan are still on disk, but **Data folder** or "
-                    "**Cache folder** does not match that scan. Put the same paths back (check "
-                    "spelling and drive letter), or click **Scan now** to rebuild."
+                    "Manifests from an earlier scan are on disk, but the **Data folder** or "
+                    "**Cache folder** path does not match that scan. Click **Scan now** to "
+                    "rebuild, or load the existing results anyway."
                 )
-                st.info("Click **Scan now** to scan the folder and build cached manifests.")
-                st.stop()
+                _col_a, _col_b = st.columns(2)
+                if _col_a.button("Load existing manifests anyway", key="_btn_load_stale"):
+                    st.session_state["_load_stale_manifests"] = str(candidate)
+                if st.session_state.get("_load_stale_manifests") == str(candidate):
+                    manifests_dir = candidate
+                else:
+                    st.stop()
             else:
                 st.info("Click **Scan now** to scan the folder and build cached manifests.")
                 st.stop()
@@ -885,7 +902,14 @@ with st.sidebar:
             st.caption(f"Using extracted manifests from this URL (no re-download): `{manifests_dir}`")
         else:
             with st.spinner("Downloading manifests..."):
-                manifests_dir = _download_and_extract_manifests_zip(url_norm)
+                try:
+                    manifests_dir = _download_and_extract_manifests_zip(url_norm)
+                except zipfile.BadZipFile:
+                    st.error("Downloaded file is not a valid zip (corrupt or wrong URL).")
+                    st.stop()
+                except (FileNotFoundError, ValueError) as _ze:
+                    st.error(f"Could not load manifests from URL: {_ze}")
+                    st.stop()
             st.session_state["_gnss_last_zip_url"] = url_norm
             st.session_state["_gnss_last_zip_manifests_dir"] = str(manifests_dir.resolve())
             st.caption(f"Loaded manifests from URL into `{manifests_dir}`")
@@ -929,6 +953,9 @@ with st.sidebar:
                 try:
                     _safe_extract_zip(zpath, tmp)
                     manifests_dir = _find_manifests_dir(tmp)
+                except zipfile.BadZipFile:
+                    st.error("Uploaded file is not a valid zip (corrupt or truncated download).")
+                    st.stop()
                 except FileNotFoundError:
                     st.error("Could not find `files_manifest.csv` + `summary.json` in the uploaded zip.")
                     st.stop()
@@ -1086,7 +1113,7 @@ if (
             # Keep the UI clean (these may not exist if merge didn't create them)
             for c in ["lat_geonet", "lon_geonet", "site_name"]:
                 if c in df.columns:
-                    pass
+                    df.drop(columns=[c], inplace=True)
 
 # Utility downloads (manifest zip + sqlite db).
 # IMPORTANT: build the bytes lazily AND cache them. Previously these ran on
@@ -1250,7 +1277,7 @@ with _safe_tab("Overview", tab_overview):
 
     if "signals" in df.columns:
         st.markdown("### Receiver inventory (from runpkr00 / embedded headers)")
-        inv = _extract_runpkr00_inventory(df["signals"])
+        inv = _extract_runpkr00_inventory(tuple(df["signals"].dropna().astype(str).tolist()))
         if inv.empty:
             st.info("No receiver inventory found in this manifest (likely not T02/T04 or not scanned with runpkr00).")
         else:
@@ -1275,322 +1302,201 @@ with _safe_tab("Station", tab_station):
     if not all_prefixes:
         st.warning("No stations in the manifest. Run a scan first.")
         raise _SkipTab()
-    # Pick a real default from the actual data (do not hardcode "for"; that's a
-    # debug leftover that produced an empty selection on every other dataset).
-    default_focus = all_prefixes[0]
+    # Reset station selection when the manifest path changes (user switched dataset).
+    if st.session_state.get("_station_manifest") != str(manifests_dir):
+        st.session_state.pop("station_select_value", None)
+        st.session_state["_station_manifest"] = str(manifests_dir)
+    if st.session_state.get("station_select_value") not in all_prefixes:
+        st.session_state["station_select_value"] = all_prefixes[0]
 
-    c1, c2, c3, c4 = st.columns([2, 2, 2, 2])
-    # Avoid blank/stop behavior while typing by using an explicit submit form.
-    if "station_query" not in st.session_state:
-        st.session_state.station_query = default_focus
-    if "station_select_value" not in st.session_state:
-        st.session_state.station_select_value = None
-
-    with c1.form("station_pick_form", clear_on_submit=False):
-        q = st.text_input("Find station", value=st.session_state.station_query)
-        submitted = st.form_submit_button("Apply", use_container_width=True)
-    if submitted:
-        st.session_state.station_query = q
-
-    query = (st.session_state.station_query or "").strip().lower()
-    filtered = [p for p in all_prefixes if query in str(p).lower()] if query else all_prefixes
-    if not filtered:
-        st.info("No stations match your search; showing all stations.")
-        filtered = all_prefixes
-
-    opts = filtered[:500]
-    prior = st.session_state.get("station_select_value")
-    # Streamlit ignores `index=` on reruns — the widget's session_state wins. So
-    # after a rescan/new manifest, or after the search box narrows options, the
-    # old `station_select_value` can point at a station ID that no longer exists
-    # in `df`, producing an empty filter and the confusing "No records" message
-    # even though `len(df)` is large. Force-coerce to a valid option BEFORE the
-    # selectbox is instantiated.
-    if opts and (prior not in opts):
-        st.session_state["station_select_value"] = opts[0]
-
-    station = c1.selectbox(
-        f"Station ({station_col})",
-        options=opts,
-        key="station_select_value",
-    )
-    # Defensive: same normalization as df[station_col] (numeric-ish widget return values).
+    # ── Single control row ────────────────────────────────────────
+    c1, c2, c3, c4 = st.columns([3, 2, 2, 2])
+    station = c1.selectbox(f"Station ({station_col})", options=all_prefixes, key="station_select_value")
     station = _normalize_station_id_series(pd.Series([station])).iloc[0]
 
-    exts = sorted(df["ext"].dropna().unique().tolist())
-    default_exts = [e for e in exts if e in {".to2", ".t02", ".to4", ".t04", ".zip", ".gz", ".rnx", ".obs", ".o"}] or exts
-    sel_ext = c2.multiselect("Include extensions", exts, default=default_exts)
-    # Empty selection means "all extensions" -- otherwise the next filter would
-    # always return zero rows and blank the tab.
-    if not sel_ext:
-        sel_ext = exts
-
-    tz_name = c3.selectbox("Timezone", options=["UTC"], index=0)
-    week_start = c4.selectbox("Week starts on", options=["Mon"], index=0, disabled=True)
-
-    sdf = df[(df[station_col] == station) & (df["ext"].isin(sel_ext))].copy()
-    if sdf.empty:
-        sdf = df[df[station_col] == station].copy()
+    sdf = df[df[station_col] == station].copy()
     if sdf.empty:
         st.warning(f"No records for station '{station}'. Pick a different station.")
         raise _SkipTab()
-
-    sdf["event_ts"] = _to_tz(sdf["event_ts_utc"], tz_name)
+    sdf["event_ts"] = _to_tz(sdf["event_ts_utc"], "UTC")
     sdf["event_hour"] = sdf["event_ts"].dt.floor(pd.Timedelta(hours=1))
-
-    # Coverage range controls
     min_ts = sdf["event_hour"].min()
     max_ts = sdf["event_hour"].max()
-    r1, r2, r3 = st.columns([2, 2, 2])
-    start_date = r1.date_input("Start date", value=min_ts.date())
-    end_date = r2.date_input("End date", value=max_ts.date())
-    expected_mode = r3.selectbox("Expected schedule", options=["24/7", "Business hours", "Custom"], index=0)
 
-    # Build expected-hours mask (dow, hour)
-    if expected_mode == "24/7":
-        expected_dows = set(range(7))
+    # Reset date pickers when station changes so they reflect the new station's range.
+    if st.session_state.get("_station_date_for") != station:
+        st.session_state["station_start_date"] = min_ts.date()
+        st.session_state["station_end_date"] = max_ts.date()
+        st.session_state["_station_date_for"] = station
+    start_date = c2.date_input("From", key="station_start_date")
+    end_date   = c3.date_input("To",   key="station_end_date")
+    schedule   = c4.selectbox("Schedule", options=["24/7", "Business hours"], index=0)
+
+    if schedule == "24/7":
+        expected_dows  = set(range(7))
         expected_hours = set(range(24))
-    elif expected_mode == "Business hours":
-        expected_dows = set(range(5))  # Mon-Fri
-        expected_hours = set(range(9, 18))  # 09..17
     else:
-        cd1, cd2 = st.columns([2, 2])
-        expected_dows = set(cd1.multiselect("Days", options=_day_labels(), default=_day_labels()))
-        expected_dows = { _day_labels().index(d) for d in expected_dows } if expected_dows else set()
-        hr = cd2.slider("Hours", 0, 23, (0, 23))
-        expected_hours = set(range(int(hr[0]), int(hr[1]) + 1))
+        expected_dows  = set(range(5))
+        expected_hours = set(range(9, 18))
 
-    # Construct full hourly timeline in selected range
-    start_ts = pd.Timestamp(start_date, tz=tz_name)
-    end_ts = pd.Timestamp(end_date, tz=tz_name) + pd.Timedelta(hours=23)
-    full_hours = pd.date_range(start=start_ts, end=end_ts, freq=pd.Timedelta(hours=1), tz=tz_name)
-    timeline = pd.DataFrame({"event_hour": full_hours})
+    # ── Build hourly timeline ─────────────────────────────────────
+    start_ts  = pd.Timestamp(start_date, tz="UTC")
+    end_ts    = pd.Timestamp(end_date,   tz="UTC") + pd.Timedelta(hours=23)
+    full_hours = pd.date_range(start=start_ts, end=end_ts, freq=pd.Timedelta(hours=1), tz="UTC")
+    timeline  = pd.DataFrame({"event_hour": full_hours})
     hour_counts = sdf.groupby("event_hour", as_index=False).agg(file_count=("file_name", "count"))
-    timeline = timeline.merge(hour_counts, on="event_hour", how="left")
+    timeline  = timeline.merge(hour_counts, on="event_hour", how="left")
     timeline["file_count"] = timeline["file_count"].fillna(0).astype(int)
-    timeline["has_data"] = timeline["file_count"] > 0
-    timeline["dow"] = timeline["event_hour"].dt.dayofweek
-    timeline["hour"] = timeline["event_hour"].dt.hour
-    timeline["is_expected"] = timeline["dow"].isin(list(expected_dows)) & timeline["hour"].isin(list(expected_hours))
+    timeline["has_data"]   = timeline["file_count"] > 0
+    timeline["dow"]        = timeline["event_hour"].dt.dayofweek
+    timeline["hour"]       = timeline["event_hour"].dt.hour
+    timeline["is_expected"] = (
+        timeline["dow"].isin(list(expected_dows)) & timeline["hour"].isin(list(expected_hours))
+    )
 
     expected = timeline[timeline["is_expected"]].copy()
     if expected.empty:
-        st.warning("No expected hours in the selected date range + schedule. Adjust schedule/range.")
+        st.warning("No expected hours in the selected range + schedule.")
         raise _SkipTab()
 
-    cov = expected["has_data"].mean()
-    m1, m2, m3, m4 = st.columns(4)
-    m1.metric("Coverage (expected hours)", f"{cov * 100:.1f}%")
-    m2.metric("Expected hours", f"{len(expected):,}")
-    m3.metric("Hours with data", f"{int(expected['has_data'].sum()):,}")
-    m4.metric("Hours missing", f"{int((~expected['has_data']).sum()):,}")
-
-    st.markdown("### Gap diagnostics (expected hours)")
-    # Longest missing streak and most-missed hours of day.
-    expected_sorted = expected.sort_values("event_hour")
-    longest_gap = _longest_false_run(expected_sorted["has_data"])
-    g1, g2, g3 = st.columns(3)
-    g1.metric("Longest missing streak (hours)", f"{int(longest_gap):,}")
-    # Most missed hours-of-day (systematic issues)
-    miss = expected_sorted[~expected_sorted["has_data"]].copy()
-    if miss.empty:
-        g2.metric("Most-missed hour", "—")
-        g3.metric("Most-missed day", "—")
-    else:
-        by_hour = miss.groupby("hour", as_index=False).size().rename(columns={"size": "missing"})
-        by_hour = by_hour.sort_values("missing", ascending=False)
-        by_day = miss.groupby("dow", as_index=False).size().rename(columns={"size": "missing"})
-        by_day = by_day.sort_values("missing", ascending=False)
-        top_hour = int(by_hour.iloc[0]["hour"])
-        top_day = int(by_day.iloc[0]["dow"])
-        g2.metric("Most-missed hour", f"{top_hour:02d}:00 (missing {int(by_hour.iloc[0]['missing']):,})")
-        g3.metric("Most-missed day", f"{_day_labels()[top_day]} (missing {int(by_day.iloc[0]['missing']):,})")
-
-        st.markdown("**Top missing hours (hour-of-day)**")
-        by_hour["hour_label"] = by_hour["hour"].apply(lambda h: f"{int(h):02d}:00")
-        st.dataframe(by_hour[["hour_label", "missing"]].head(12), use_container_width=True, height=240)
-
-    # Capabilities (constellations/signals) if present in manifest
-    if "constellations" in sdf.columns or "signals" in sdf.columns:
-        cs = sorted({c for v in sdf.get("constellations", pd.Series(dtype=str)).dropna().tolist() for c in _parse_csv_list(v)})
-        ss = sorted({s for v in sdf.get("signals", pd.Series(dtype=str)).dropna().tolist() for s in _parse_csv_list(v)})
-        cap1, cap2 = st.columns(2)
-        with cap1:
-            st.markdown("### Constellations")
-            st.write(", ".join(cs) if cs else "— (not parsed / not present)")
-        with cap2:
-            st.markdown("### Signals / Obs types")
-            st.write(", ".join(ss[:200]) + (" …" if len(ss) > 200 else "") if ss else "— (not parsed / not present)")
-
-    st.markdown("### Weekly hour-by-hour coverage (expected hours)")
-    expected["iso_year"] = expected["event_hour"].dt.isocalendar().year.astype(int)
-    expected["iso_week"] = expected["event_hour"].dt.isocalendar().week.astype(int)
-    expected["week_label"] = expected["iso_year"].astype(str) + "-W" + expected["iso_week"].astype(str).str.zfill(2)
+    # Week labels used by both expanders — compute once here.
+    expected["iso_year"]   = expected["event_hour"].dt.isocalendar().year.astype(int)
+    expected["iso_week"]   = expected["event_hour"].dt.isocalendar().week.astype(int)
+    expected["week_label"] = (
+        expected["iso_year"].astype(str) + "-W" + expected["iso_week"].astype(str).str.zfill(2)
+    )
     expected["has_data_int"] = expected["has_data"].astype(int)
 
-    # "Average: Sundays 15-16 active 83%" style control
-    st.markdown("### Answer: “On <day> between <h1>–<h2> active X%”")
-    a1, a2, a3 = st.columns([2, 2, 2])
-    day = a1.selectbox("Day", options=_day_labels(), index=_day_labels().index("Sun"))
-    h_from, h_to = a2.slider("Hours window", 0, 23, (15, 16))
-    scope = a3.selectbox("Scope", options=["Across selected range", "Per-week table"], index=0)
+    # ── Key metrics ───────────────────────────────────────────────
+    cov = expected["has_data"].mean()
+    longest_gap = _longest_false_run(expected.sort_values("event_hour")["has_data"])
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Coverage", f"{cov * 100:.1f}%")
+    m2.metric("Expected hours", f"{len(expected):,}")
+    m3.metric("Hours with data", f"{int(expected['has_data'].sum()):,}")
+    m4.metric("Longest gap", f"{int(longest_gap):,} h")
 
-    target = expected[(expected["dow"] == _day_labels().index(day)) & (expected["hour"].between(int(h_from), int(h_to)))].copy()
-    if target.empty:
-        st.info("No expected hours match that day/hour window in the selected range.")
-    else:
-        ratio = target["has_data"].mean()
-        st.success(f"{day} {h_from:02d}:00–{h_to:02d}:59 active **{ratio * 100:.1f}%** (expected hours only)")
-        if scope == "Per-week table":
-            by_week = target.groupby("week_label", as_index=False).agg(
-                expected_hours=("has_data", "count"),
-                active_hours=("has_data", "sum"),
-            )
-            by_week["active_pct"] = (by_week["active_hours"] / by_week["expected_hours"]) * 100.0
-            st.dataframe(by_week.sort_values("week_label"), use_container_width=True, height=360)
-
-    # Heatmaps: per selected week and aggregate across all weeks
-    week_labels = sorted(expected["week_label"].dropna().unique().tolist())
-    if not week_labels:
-        st.warning("No weeks available in this date range. Expand the date range or check your station selection.")
-        raise _SkipTab()
-
-    selected_week = st.selectbox("Week to view", week_labels, index=len(week_labels) - 1)
-    week_df = expected[expected["week_label"] == selected_week].copy()
-
-    week_mat = _coverage_matrix(
-        week_df.groupby(["dow", "hour"], as_index=False)["has_data_int"].max(),
-        value_col="has_data_int",
-    )
-    fig_week = px.imshow(
-        week_mat,
-        labels=dict(x="Hour", y="Day", color="Has data"),
-        color_continuous_scale=["#d62728", "#2ca02c"],
-        zmin=0,
-        zmax=1,
-        aspect="auto",
-        title=f"{station} — Week {selected_week} (expected hours): 1=has data, 0=missing",
-    )
-    st.plotly_chart(fig_week, use_container_width=True)
-
-    agg = (
-        expected.groupby(["week_label", "dow", "hour"], as_index=False)["has_data_int"].max()
-        .groupby(["dow", "hour"], as_index=False)["has_data_int"].mean()
-        .rename(columns={"has_data_int": "coverage_ratio"})
-    )
-    agg_mat = _coverage_matrix(agg, value_col="coverage_ratio")
-    fig_agg = px.imshow(
-        agg_mat,
-        labels=dict(x="Hour", y="Day", color="Coverage"),
-        color_continuous_scale="Viridis",
-        zmin=0.0,
-        zmax=1.0,
-        aspect="auto",
-        title=f"{station} — Across all weeks: fraction of weeks with data (expected hours)",
-    )
-    st.plotly_chart(fig_agg, use_container_width=True)
-
-    st.markdown("### Whole-week table: % covered (week-by-week)")
-    st.caption("X = day of week, Y = hour (0–23). Values are % covered for that hour.")
-
-    # Week navigation with arrows
-    # Reset week index when station changes, and always clamp to valid range.
-    if st.session_state.get("week_nav_station") != station:
-        st.session_state.week_nav_station = station
-        st.session_state.week_nav_idx = len(week_labels) - 1
-    if "week_nav_idx" not in st.session_state:
-        st.session_state.week_nav_idx = len(week_labels) - 1
-    st.session_state.week_nav_idx = int(max(0, min(len(week_labels) - 1, int(st.session_state.week_nav_idx))))
-
-    nav1, nav2, nav3 = st.columns([1, 2, 1])
-    with nav1:
-        if st.button("◀ Prev week", use_container_width=True, disabled=len(week_labels) <= 1) and st.session_state.week_nav_idx > 0:
-            st.session_state.week_nav_idx -= 1
-    with nav3:
-        if (
-            st.button("Next week ▶", use_container_width=True, disabled=len(week_labels) <= 1)
-            and st.session_state.week_nav_idx < len(week_labels) - 1
-        ):
-            st.session_state.week_nav_idx += 1
-    with nav2:
-        if len(week_labels) > 1:
-            st.session_state.week_nav_idx = st.slider(
-                "Week index",
-                0,
-                len(week_labels) - 1,
-                int(st.session_state.week_nav_idx),
-                label_visibility="collapsed",
-            )
-        else:
-            # Avoid StreamlitAPIException: slider min must be < max.
-            st.caption("Only one week in this date range.")
-
-    nav_week = week_labels[int(st.session_state.week_nav_idx)] if week_labels else selected_week
-    st.write(f"Showing: **{nav_week}**")
-
-    nav_week_df = expected[expected["week_label"] == nav_week].copy()
-    nav_week_df["covered_pct"] = nav_week_df["has_data_int"] * 100.0
-    week_pct = (
-        nav_week_df.groupby(["dow", "hour"], as_index=False)["covered_pct"].max()
-        .pivot(index="hour", columns="dow", values="covered_pct")
-        .reindex(index=range(24), columns=range(7), fill_value=0.0)
-    )
-    week_pct.columns = _day_labels()
-    hour_labels = [f"{h:02d}:00" for h in range(24)]
-    fig_week_pct = px.imshow(
-        week_pct,
-        x=_day_labels(),
-        y=hour_labels,
-        labels=dict(x="Day of week", y="Hour of day", color="% covered"),
-        color_continuous_scale="Viridis",
-        zmin=0.0,
-        zmax=100.0,
-        aspect="auto",
-        title=f"{station} — {nav_week}: % covered per day/hour (expected hours)",
-    )
-    fig_week_pct.update_yaxes(autorange="reversed")
-    st.plotly_chart(fig_week_pct, use_container_width=True)
-
-    st.markdown("### Whole-week table: % covered (selected date range)")
-    st.caption("Same layout, but % is computed across the full selected date range (so values like 83% are meaningful).")
-
-    range_pct = (
-        expected.groupby(["dow", "hour"], as_index=False)["has_data_int"].mean()
-        .rename(columns={"has_data_int": "coverage_ratio"})
-    )
-    range_pct["coverage_pct"] = range_pct["coverage_ratio"] * 100.0
-    range_mat_pct = (
-        range_pct.pivot(index="hour", columns="dow", values="coverage_pct")
-        .reindex(index=range(24), columns=range(7), fill_value=0.0)
-    )
-    range_mat_pct.columns = _day_labels()
-    fig_range_pct = px.imshow(
-        range_mat_pct,
-        x=_day_labels(),
-        y=hour_labels,
-        labels=dict(x="Day of week", y="Hour of day", color="% covered"),
-        color_continuous_scale="Viridis",
-        zmin=0.0,
-        zmax=100.0,
-        aspect="auto",
-        title=f"{station} — Selected range: % covered per day/hour (expected hours)",
-    )
-    fig_range_pct.update_yaxes(autorange="reversed")
-    st.plotly_chart(fig_range_pct, use_container_width=True)
-
-    st.markdown("### Timeline (expected hours only)")
+    # ── Timeline (primary chart — always visible) ─────────────────
     line = expected.sort_values("event_hour")
     fig_tl = go.Figure()
-    fig_tl.add_trace(go.Scatter(x=line["event_hour"], y=line["file_count"], mode="lines", name="Files/hour"))
+    fig_tl.add_trace(go.Scatter(
+        x=line["event_hour"], y=line["file_count"],
+        mode="lines", name="Files/hour", fill="tozeroy",
+        line=dict(color="#2ca02c"),
+    ))
     fig_tl.add_trace(go.Scatter(
         x=line.loc[~line["has_data"], "event_hour"],
         y=[0] * int((~line["has_data"]).sum()),
-        mode="markers",
-        name="Missing hour",
-        marker=dict(color="#d62728", size=5),
+        mode="markers", name="Missing hour",
+        marker=dict(color="#d62728", size=5, symbol="x"),
     ))
-    fig_tl.update_layout(title=f"{station} — hourly counts (expected hours)", xaxis_title="Hour", yaxis_title="Files")
+    fig_tl.update_layout(
+        title=f"{station} — files per hour",
+        xaxis_title="Time (UTC)", yaxis_title="Files",
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        margin=dict(t=50, b=40),
+    )
     st.plotly_chart(fig_tl, use_container_width=True)
+
+    # ── Day/hour coverage pattern (collapsed by default) ──────────
+    with st.expander("Day/hour coverage pattern", expanded=False):
+        st.caption("Green = consistently active. Red = consistently missing. Each cell = % of weeks with data.")
+        hour_labels = [f"{h:02d}:00" for h in range(24)]
+        agg = (
+            expected.groupby(["week_label", "dow", "hour"], as_index=False)["has_data_int"].max()
+            .groupby(["dow", "hour"], as_index=False)["has_data_int"].mean()
+        )
+        agg["coverage_pct"] = agg["has_data_int"] * 100.0
+        agg_mat = (
+            agg.pivot(index="hour", columns="dow", values="coverage_pct")
+            .reindex(index=range(24), columns=range(7), fill_value=0.0)
+        )
+        agg_mat.columns = _day_labels()
+        fig_heat = px.imshow(
+            agg_mat, x=_day_labels(), y=hour_labels,
+            labels=dict(x="Day", y="Hour", color="% weeks active"),
+            color_continuous_scale="RdYlGn", zmin=0.0, zmax=100.0, aspect="auto",
+            title=f"{station} — coverage by day/hour (% of weeks)",
+        )
+        fig_heat.update_yaxes(autorange="reversed")
+        st.plotly_chart(fig_heat, use_container_width=True)
+
+        week_labels = sorted(expected["week_label"].dropna().unique().tolist())
+        if week_labels:
+            selected_week = st.selectbox("Single week", week_labels, index=len(week_labels) - 1)
+            week_df = expected[expected["week_label"] == selected_week].copy()
+            week_df["covered_pct"] = week_df["has_data_int"] * 100.0
+            week_pct = (
+                week_df.groupby(["dow", "hour"], as_index=False)["covered_pct"].max()
+                .pivot(index="hour", columns="dow", values="covered_pct")
+                .reindex(index=range(24), columns=range(7), fill_value=0.0)
+            )
+            week_pct.columns = _day_labels()
+            fig_wk = px.imshow(
+                week_pct, x=_day_labels(), y=hour_labels,
+                labels=dict(x="Day", y="Hour", color="Has data"),
+                color_continuous_scale="RdYlGn", zmin=0.0, zmax=100.0, aspect="auto",
+                title=f"{station} — {selected_week}",
+            )
+            fig_wk.update_yaxes(autorange="reversed")
+            st.plotly_chart(fig_wk, use_container_width=True)
+
+    # ── Detailed diagnostics (collapsed by default) ───────────────
+    with st.expander("Detailed diagnostics", expanded=False):
+        miss = expected.sort_values("event_hour")
+        miss = miss[~miss["has_data"]].copy()
+        if miss.empty:
+            st.success("No missing hours in the selected range.")
+        else:
+            by_hour = (
+                miss.groupby("hour", as_index=False).size()
+                .rename(columns={"size": "missing"}).sort_values("missing", ascending=False)
+            )
+            by_day = (
+                miss.groupby("dow", as_index=False).size()
+                .rename(columns={"size": "missing"}).sort_values("missing", ascending=False)
+            )
+            by_hour["hour_label"] = by_hour["hour"].apply(lambda h: f"{int(h):02d}:00")
+            by_day["day_label"]   = by_day["dow"].apply(lambda d: _day_labels()[int(d)])
+            dg1, dg2 = st.columns(2)
+            with dg1:
+                st.markdown("**Most-missed hours of day**")
+                st.dataframe(by_hour[["hour_label", "missing"]].head(12), use_container_width=True, height=280)
+            with dg2:
+                st.markdown("**Most-missed days of week**")
+                st.dataframe(by_day[["day_label", "missing"]].head(7), use_container_width=True, height=280)
+
+        st.divider()
+        st.markdown("**Activity drill-down** — what % of the time is this station active at a specific day/hour?")
+        a1, a2, a3 = st.columns([2, 2, 2])
+        day_sel = a1.selectbox("Day", options=_day_labels(), index=_day_labels().index("Sun"), key=f"drill_day_{station}")
+        h_from, h_to = a2.slider("Hours", 0, 23, (15, 16), key=f"drill_hrs_{station}")
+        scope = a3.selectbox("Show", options=["Summary", "Per-week table"], index=0, key=f"drill_scope_{station}")
+        target = expected[
+            (expected["dow"] == _day_labels().index(day_sel)) &
+            (expected["hour"].between(int(h_from), int(h_to)))
+        ].copy()
+        if target.empty:
+            st.info("No expected hours match that day/hour in the selected range.")
+        else:
+            ratio = target["has_data"].mean()
+            st.success(f"{day_sel} {h_from:02d}:00–{h_to:02d}:59 → active **{ratio * 100:.1f}%** of expected hours")
+            if scope == "Per-week table":
+                by_week = target.groupby("week_label", as_index=False).agg(
+                    expected_hours=("has_data", "count"),
+                    active_hours=("has_data", "sum"),
+                )
+                by_week["active_pct"] = (by_week["active_hours"] / by_week["expected_hours"]) * 100.0
+                st.dataframe(by_week.sort_values("week_label"), use_container_width=True, height=360)
+
+        if "constellations" in sdf.columns or "signals" in sdf.columns:
+            st.divider()
+            st.markdown("**Receiver capabilities**")
+            cs = sorted({c for v in sdf.get("constellations", pd.Series(dtype=str)).dropna() for c in _parse_csv_list(v)})
+            ss = sorted({s for v in sdf.get("signals", pd.Series(dtype=str)).dropna() for s in _parse_csv_list(v)})
+            cap1, cap2 = st.columns(2)
+            cap1.write("Constellations: " + (", ".join(cs) if cs else "—"))
+            cap2.write("Signals: " + ((", ".join(ss[:100]) + (" …" if len(ss) > 100 else "")) if ss else "—"))
 
 with _safe_tab("Raw", tab_raw):
     st.subheader("Raw records (debugging)")
@@ -1702,7 +1608,7 @@ with _safe_tab("VRS", tab_vrs):
         vrs_lat = float(c2.number_input("VRS lat", value=float(loc4["lat"].mean())))
         vrs_lon = float(c3.number_input("VRS lon", value=float(loc4["lon"].mean())))
 
-    # Weights (inverse distance) for “in between” interpolation readout
+    # Weights (inverse distance) for "in between" interpolation readout
     dists = []
     for _, r in loc4.iterrows():
         d = _haversine_km(vrs_lat, vrs_lon, float(r["lat"]), float(r["lon"]))
@@ -1782,6 +1688,9 @@ with _safe_tab("Map", tab_map):
     hours = pd.date_range(day_start, day_end, freq=pd.Timedelta(hours=1), tz="UTC")
     dow = int(day_start.dayofweek)
     expected_hours_today = sorted([h for h in range(24) if (dow in expected_dows and h in expected_hours)])
+    if not expected_hours_today:
+        st.info(f"No expected hours for {day.strftime('%A')} under '{expected_mode_map}' schedule. Pick a different day or schedule.")
+        raise _SkipTab()
 
     # Count files per station per hour
     ddf = mdf[(mdf["event_hour_utc"] >= day_start) & (mdf["event_hour_utc"] <= day_end)].copy()
@@ -1818,7 +1727,7 @@ with _safe_tab("Map", tab_map):
     rmin, rmax = st.slider("Coverage range (%)", 0, 100, (0, 100), step=5, key="map_cov_range")
 
     if station_query.strip():
-        plot_df = plot_df[plot_df[station_col].astype(str).str.contains(station_query.strip().lower())].copy()
+        plot_df = plot_df[plot_df[station_col].astype(str).str.contains(station_query.strip().lower(), regex=False)].copy()
     plot_df = plot_df[(plot_df["coverage_pct"] >= rmin) & (plot_df["coverage_pct"] <= rmax)].copy()
 
     # Keep plot responsive: prefer stations with more files (more representative)
@@ -1835,7 +1744,7 @@ with _safe_tab("Map", tab_map):
         lat="lat",
         lon="lon",
         color="coverage_pct",
-        color_continuous_scale="Viridis",
+        color_continuous_scale="RdYlGn",
         range_color=(0, 100),
         hover_name=station_col,
         hover_data={"coverage_pct": ":.1f", "files": True, "lat": ":.4f", "lon": ":.4f"},

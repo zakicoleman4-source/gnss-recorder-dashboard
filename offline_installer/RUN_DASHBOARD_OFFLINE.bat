@@ -49,16 +49,13 @@ REM Where _dbg writes debug-c48812.log -- pin to the app folder so we can
 REM always tell the client "send me <app>\debug-c48812.log".
 set "GNSS_DEBUG_DIR=%ROOT%\gnss-recorder-dashboard"
 
-REM Find a free TCP port starting at 8501. Streamlit's default is 8501, but
-REM that's also Slack's localhost dev port and many other tools', so trying a
-REM small range here saves a "address already in use" support call.
+REM Find a free TCP port starting at 8501. Uses Python socket bind to test
+REM (locale-independent; avoids netstat output format differences).
 set "PORT="
 for /L %%P in (8501,1,8520) do (
   if not defined PORT (
-    netstat -an | findstr /R /C:":%%P  *LISTENING" >nul 2>&1
-    if errorlevel 1 (
-      set "PORT=%%P"
-    )
+    "%VENV%\Scripts\python.exe" -c "import socket; s=socket.socket(); s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1); s.bind(('127.0.0.1',%%P)); s.close()" >nul 2>&1
+    if not errorlevel 1 set "PORT=%%P"
   )
 )
 if not defined PORT set "PORT=8501"

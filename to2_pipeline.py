@@ -423,7 +423,6 @@ def _db_init(conn: sqlite3.Connection) -> None:
     ]
     for stmt in ddl:
         conn.execute(stmt)
-    conn.commit()
 
     # Migrate existing DBs — ALTER TABLE is a no-op if column already exists
     # (SQLite ≥ 3.37 raises OperationalError; we catch and ignore).
@@ -439,7 +438,6 @@ def _db_init(conn: sqlite3.Connection) -> None:
     ]:
         try:
             conn.execute(f"ALTER TABLE files ADD COLUMN {col} {typedef}")
-            conn.commit()
         except sqlite3.OperationalError:
             pass
 
@@ -829,8 +827,9 @@ def _rnx2rtkp_spp(
 
     if not lats:
         return None
-    mid = len(lats) // 2
-    return sorted(lats)[mid], sorted(lons)[mid], sorted(hgts)[mid]
+    triplets = sorted(zip(lats, lons, hgts))
+    mid = len(triplets) // 2
+    return triplets[mid]
 
 
 
@@ -901,17 +900,17 @@ def run_pipeline(cfg: PipelineConfig, progress_cb=None) -> Path:
 
     exclude = [cfg.cache_dir]
 
+    _PIPELINE_LOCK.acquire()
+
     # Pre-flight: any stale WAL/SHM file from a killed process blocks DELETE-mode
     # writes with "database is locked" because SQLite needs exclusive access to
-    # resolve the orphaned WAL before it can write. Delete sidecars before
-    # connecting so we always open a clean DELETE-mode DB.
+    # resolve the orphaned WAL before it can write. Delete sidecars after
+    # acquiring the lock so we never clobber another process's in-flight write.
     for _suf in ("-wal", "-shm", "-journal"):
         try:
             Path(str(db_path) + _suf).unlink()
         except OSError:
             pass
-
-    _PIPELINE_LOCK.acquire()
     conn = None
     try:
         conn = _db_connect(db_path)
@@ -1037,7 +1036,7 @@ def run_pipeline(cfg: PipelineConfig, progress_cb=None) -> Path:
                         else:
                             convert_status = "ok" if rinex_obs else "failed"
                             if not rinex_obs:
-                                convert_detail = "no converter configured for this file"
+                                convert_detail = "converter ran but produced no output file"
 
                     attempted_by_station[station] = attempted_by_station.get(station, 0) + 1
                     if convert_status == "ok":
