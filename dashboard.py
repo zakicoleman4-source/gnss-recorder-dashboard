@@ -8,7 +8,6 @@ import re
 import sqlite3
 import sys
 import tempfile
-import time
 import zipfile
 from pathlib import Path
 
@@ -25,69 +24,6 @@ _THIS_DIR = Path(__file__).resolve().parent
 if str(_THIS_DIR) not in sys.path:
     sys.path.insert(0, str(_THIS_DIR))
 
-
-def _debug_log_dir() -> Path:
-    """
-    Where to put the debug log files.
-
-    Priority:
-      1. GNSS_DEBUG_DIR env var (lets ops point logs anywhere they want).
-      2. Next to dashboard.py (always exists, always writable for the user that
-         can run the script).
-      3. Path.cwd() as a last resort.
-
-    Previously we wrote to Path.cwd() unconditionally, which produced log files
-    in unpredictable places depending on how Streamlit was launched -- making
-    "send me the log file" impossible to support.
-    """
-    override = os.environ.get("GNSS_DEBUG_DIR", "").strip()
-    if override:
-        try:
-            p = Path(override).expanduser().resolve()
-            p.mkdir(parents=True, exist_ok=True)
-            return p
-        except Exception:
-            pass
-    try:
-        _THIS_DIR.mkdir(parents=True, exist_ok=True)
-        return _THIS_DIR
-    except Exception:
-        return Path.cwd()
-
-
-# #region agent log
-def _dbg(hypothesis_id: str, message: str, data: dict) -> None:
-    try:
-        payload = {
-            "sessionId": "c48812",
-            "runId": "pre-fix",
-            "hypothesisId": hypothesis_id,
-            "location": "dashboard.py",
-            "message": message,
-            "data": data,
-            "timestamp": int(time.time() * 1000),
-        }
-        log_dir = _debug_log_dir()
-        (log_dir / "debug-c48812.log").open("a", encoding="utf-8").write(json.dumps(payload) + "\n")
-        # Also write a human-readable log for copy/paste via email/chat.
-        # Format: timestamp | hypothesis | message | key=val...
-        kv = " ".join([f"{k}={repr(v)[:200]}" for k, v in (data or {}).items()])
-        line = f"{payload['timestamp']} | {hypothesis_id} | {message} | {kv}\n"
-        (log_dir / "debug-c48812_readable.txt").open("a", encoding="utf-8").write(line)
-    except Exception:
-        pass
-
-
-_dbg(
-    "BOOT",
-    "dashboard_boot",
-    {
-        "file": str(Path(__file__).resolve()),
-        "cwd": str(Path.cwd()),
-        "python": sys.version.splitlines()[0],
-    },
-)
-# #endregion agent log
 
 st.set_page_config(page_title="GNSS Recorder Dashboard", layout="wide")
 
@@ -360,10 +296,6 @@ def _safe_tab(name: str, tab):
             return
         except Exception as e:
             st.error(f"{name} tab failed: {type(e).__name__}: {e}")
-            try:
-                _dbg("UI", f"{name}_tab_exception", {"err": str(e), "type": type(e).__name__})
-            except Exception:
-                pass
 
 
 def _longest_false_run(mask: pd.Series) -> int:
@@ -823,24 +755,6 @@ with st.sidebar:
             if quick_probe and match_count < 4:
                 st.warning("Very few matching files found. Probe mode may return almost nothing.")
 
-        _dbg(
-            "A",
-            "scan_start_clicked",
-            {
-                "source": source,
-                "data_root": str(data_root),
-                "cache_dir": str(cache_dir),
-                "quick_probe": bool(quick_probe),
-                "force_rescan": bool(force_rescan),
-                "match_count": match_count,
-                "use_trimble": bool(use_trimble),
-                "use_convbin": bool(use_convbin),
-                "runpkr_exists": bool(runpkr_path.exists()),
-                "teqc_exists": bool(teqc_path.exists()),
-                "convbin_exists": bool(convbin_path.exists()),
-            },
-        )
-
         prog = st.progress(0, text="Starting scan...")
 
         def _cb(i: int, total: int, path: str) -> None:
@@ -903,18 +817,6 @@ with st.sidebar:
         if sum_path.exists():
             try:
                 s = json.loads(sum_path.read_text(encoding="utf-8", errors="ignore"))
-                _dbg(
-                    "A",
-                    "scan_completed_summary",
-                    {
-                        "mode": mode_label,
-                        "manifests_dir": str(manifests_dir),
-                        "files_in_manifest": s.get("files_in_manifest"),
-                        "unique_prefixes": s.get("unique_prefixes"),
-                        "total_bytes": s.get("total_bytes"),
-                        "by_ext_counts": s.get("by_ext_counts"),
-                    },
-                )
                 st.success(
                     f"Scan complete ({mode_label}). "
                     f"files={int(s.get('files_in_manifest', 0)):,}, "
@@ -1382,17 +1284,6 @@ with _safe_tab("Station", tab_station):
     # Defensive: same normalization as df[station_col] (numeric-ish widget return values).
     station = _normalize_station_id_series(pd.Series([station])).iloc[0]
 
-    _dbg(
-        "B",
-        "station_tab_selection",
-        {
-            "query": query,
-            "filtered_len": len(filtered),
-            "selected_station": station,
-            "station_col": station_col,
-        },
-    )
-
     exts = sorted(df["ext"].dropna().unique().tolist())
     default_exts = [e for e in exts if e in {".to2", ".t02", ".to4", ".t04", ".zip", ".gz", ".rnx", ".obs", ".o"}] or exts
     sel_ext = c2.multiselect("Include extensions", exts, default=default_exts)
@@ -1409,7 +1300,6 @@ with _safe_tab("Station", tab_station):
         sdf = df[df[station_col] == station].copy()
     if sdf.empty:
         st.warning(f"No records for station '{station}'. Pick a different station.")
-        _dbg("B", "station_tab_no_rows_for_station", {"station": station, "df_rows": int(len(df))})
         raise _SkipTab()
 
     sdf["event_ts"] = _to_tz(sdf["event_ts_utc"], tz_name)

@@ -7,59 +7,18 @@ import shutil
 import sqlite3
 import subprocess
 import tempfile
-import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable, Optional
 
 import pandas as pd
-import json
 
 
 TO_EXTS = {".to2", ".t02", ".to4", ".t04"}
 STATION_RE = re.compile(r"^([A-Za-z]{3,4})")
 
 _THIS_DIR = Path(__file__).resolve().parent
-
-
-def _debug_log_dir() -> Path:
-    """Where to put the debug log files. See dashboard.py for the same logic."""
-    override = os.environ.get("GNSS_DEBUG_DIR", "").strip()
-    if override:
-        try:
-            p = Path(override).expanduser().resolve()
-            p.mkdir(parents=True, exist_ok=True)
-            return p
-        except Exception:
-            pass
-    try:
-        _THIS_DIR.mkdir(parents=True, exist_ok=True)
-        return _THIS_DIR
-    except Exception:
-        return Path.cwd()
-
-
-# #region agent log
-def _dbg(hypothesis_id: str, message: str, data: dict) -> None:
-    try:
-        payload = {
-            "sessionId": "c48812",
-            "runId": "pre-fix",
-            "hypothesisId": hypothesis_id,
-            "location": "to2_pipeline.py",
-            "message": message,
-            "data": data,
-            "timestamp": int(time.time() * 1000),
-        }
-        log_dir = _debug_log_dir()
-        (log_dir / "debug-c48812.log").open("a", encoding="utf-8").write(json.dumps(payload) + "\n")
-        kv = " ".join([f"{k}={repr(v)[:200]}" for k, v in (data or {}).items()])
-        line = f"{payload['timestamp']} | {hypothesis_id} | {message} | {kv}\n"
-        (log_dir / "debug-c48812_readable.txt").open("a", encoding="utf-8").write(line)
-    except Exception:
-        pass
-# #endregion agent log
 
 
 @dataclass(frozen=True)
@@ -755,18 +714,6 @@ def run_pipeline(cfg: PipelineConfig, progress_cb=None) -> Path:
         else:
             files = list(_iter_to_files(cfg.data_root, exclude_dirs=exclude))
         total = max(1, len(files))
-        _dbg(
-            "A",
-            "pipeline_file_list_built",
-            {
-                "mode": mode,
-                "data_root": str(cfg.data_root),
-                "files_len": int(len(files)),
-                "probe_max_total_files": int(getattr(cfg, "probe_max_total_files", -1)),
-                "max_files_per_station": cfg.max_files_per_station,
-                "stop_after_success_per_station": bool(cfg.stop_after_success_per_station),
-            },
-        )
 
         attempted_by_station: dict[str, int] = {}
         success_by_station: set[str] = set()
@@ -936,28 +883,14 @@ def run_pipeline(cfg: PipelineConfig, progress_cb=None) -> Path:
                         conn.commit()
                     except Exception:
                         pass
-            except Exception as ie:
+            except Exception:
                 # A single bad row (locked DB, encoding issue, etc.) must NOT
-                # abort the entire scan. Log and keep going.
-                _dbg("A", "pipeline_row_insert_failed", {"path": str(p), "err": str(ie)})
+                # abort the entire scan. Keep going.
                 failed += 1
         try:
             conn.commit()
         except Exception:
             pass
-        _dbg(
-            "A",
-            "pipeline_done",
-            {
-                "mode": mode,
-                "files_len": int(len(files)),
-                "processed": int(processed),
-                "cache_hits": int(cache_hits),
-                "failed": int(failed),
-                "skipped_empty": int(skipped_empty),
-                "success_stations": int(len(success_by_station)),
-            },
-        )
     finally:
         conn.close()
 
