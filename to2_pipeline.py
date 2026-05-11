@@ -8,12 +8,17 @@ import shutil
 import sqlite3
 import subprocess
 import tempfile
+import threading
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable, Optional
 
 import pandas as pd
+
+# Serialises pipeline runs within a process — prevents Streamlit rerun races
+# from opening two write connections to the same DB simultaneously.
+_PIPELINE_LOCK = threading.Lock()
 
 
 TO_EXTS = {".to2", ".t02", ".to4", ".t04"}
@@ -357,9 +362,11 @@ def _file_sig(p: Path) -> tuple[int, int]:
 
 
 def _db_connect(db_path: Path) -> sqlite3.Connection:
-    conn = sqlite3.connect(str(db_path), timeout=30)
+    # DELETE journal mode — simpler, more reliable on Windows than WAL.
+    # WAL leaves -wal/-shm files that cause lock races across Streamlit threads.
+    conn = sqlite3.connect(str(db_path), timeout=30, check_same_thread=False)
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL;")
+    conn.execute("PRAGMA journal_mode=DELETE;")
     conn.execute("PRAGMA synchronous=NORMAL;")
     conn.execute("PRAGMA busy_timeout=30000;")
     return conn
@@ -888,6 +895,7 @@ def run_pipeline(cfg: PipelineConfig, progress_cb=None) -> Path:
 
     exclude = [cfg.cache_dir]
 
+    _PIPELINE_LOCK.acquire()
     conn = _db_connect(db_path)
     try:
         _db_init(conn)
@@ -1158,6 +1166,7 @@ def run_pipeline(cfg: PipelineConfig, progress_cb=None) -> Path:
             pass
     finally:
         conn.close()
+        _PIPELINE_LOCK.release()
 
     return db_path
 
