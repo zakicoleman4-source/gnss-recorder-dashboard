@@ -33,6 +33,7 @@ class PipelineConfig:
     stop_after_success_per_station: bool = False
     probe_max_total_files: int = 200_000
     convert_cmd_template: Optional[str] = None
+    station_coords_path: Optional[Path] = None  # CSV: station,lat,lon,height_m
 
 
 def _utc_now_iso() -> str:
@@ -555,6 +556,57 @@ def _ecef_to_llh_wgs84(x: float, y: float, z: float) -> tuple[float, float, floa
     return math.degrees(lat), math.degrees(lon), h
 
 
+def _llh_to_ecef(lat_deg: float, lon_deg: float, h_m: float) -> tuple[float, float, float]:
+    import math
+    a  = 6_378_137.0
+    f  = 1.0 / 298.257_223_563
+    e2 = f * (2.0 - f)
+    lat = math.radians(lat_deg)
+    lon = math.radians(lon_deg)
+    sin_lat = math.sin(lat)
+    cos_lat = math.cos(lat)
+    N = a / math.sqrt(1.0 - e2 * sin_lat * sin_lat)
+    x = (N + h_m) * cos_lat * math.cos(lon)
+    y = (N + h_m) * cos_lat * math.sin(lon)
+    z = (N * (1.0 - e2) + h_m) * sin_lat
+    return x, y, z
+
+
+def _patch_rinex_approx_pos(obs_path: Path, lat: float, lon: float, h: float) -> None:
+    """
+    If APPROX POSITION XYZ is absent from the RINEX obs header, inject it
+    before END OF HEADER. Silently no-ops on any error or if already present.
+    """
+    try:
+        raw = obs_path.read_bytes()
+        text = raw.decode("ascii", errors="ignore")
+    except Exception:
+        return
+    if "APPROX POSITION XYZ" in text:
+        return
+    try:
+        x, y, z = _llh_to_ecef(lat, lon, h)
+    except Exception:
+        return
+    # RINEX header record: 60-char data field + 20-char label field = 80 chars
+    # XYZ: three 14.4f values (42 chars) + 18 spaces filler = 60 chars data
+    pos_line = f"{x:14.4f}{y:14.4f}{z:14.4f}                  APPROX POSITION XYZ \n"
+    lines = text.splitlines(keepends=True)
+    new_lines: list[str] = []
+    injected = False
+    for ln in lines:
+        if not injected and "END OF HEADER" in ln:
+            new_lines.append(pos_line)
+            injected = True
+        new_lines.append(ln)
+    if not injected:
+        return
+    try:
+        obs_path.write_text("".join(new_lines), encoding="ascii", errors="ignore")
+    except Exception:
+        pass
+
+
 _VALID_SYS = set("GREJCISG")
 
 
@@ -777,6 +829,25 @@ def run_pipeline(cfg: PipelineConfig, progress_cb=None) -> Path:
             files = list(_iter_to_files(cfg.data_root, exclude_dirs=exclude))
         total = max(1, len(files))
 
+        # Load user-supplied station coordinates override (station → lat, lon, height_m).
+        # Used to inject APPROX POSITION XYZ into RINEX headers when receiver didn't embed one.
+        station_coords: dict[str, tuple[float, float, float]] = {}
+        if cfg.station_coords_path and cfg.station_coords_path.exists():
+            try:
+                sc_df = pd.read_csv(cfg.station_coords_path, dtype=str)
+                for _, row in sc_df.iterrows():
+                    try:
+                        st   = str(row["station"]).strip().upper()
+                        lat_c = float(row["lat"])
+                        lon_c = float(row["lon"])
+                        h_c   = float(row.get("height_m", 0) or 0)
+                        if st:
+                            station_coords[st] = (lat_c, lon_c, h_c)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
         attempted_by_station: dict[str, int] = {}
         success_by_station: set[str] = set()
         cache_hits = 0
@@ -876,6 +947,11 @@ def run_pipeline(cfg: PipelineConfig, progress_cb=None) -> Path:
                                         lat = lon = h_m = None
                         consts, sigs = _parse_rinex_signals(hdr_lines)
                         dur_s = _duration_s(t_first, t_last)
+
+                        # ── Inject coords from override file if header had none ──
+                        if lat is None and station in station_coords:
+                            lat, lon, h_m = station_coords[station]
+                            _patch_rinex_approx_pos(rinex_obs, lat, lon, h_m)
 
                         # ── Epoch-level statistics ─────────────────────────
                         ep = _parse_rinex_epochs(rinex_obs)
