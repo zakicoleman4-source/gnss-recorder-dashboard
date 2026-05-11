@@ -603,7 +603,8 @@ def _patch_rinex_approx_pos(obs_path: Path, lat: float, lon: float, h: float) ->
     if not injected:
         return
     try:
-        obs_path.write_text("".join(new_lines), encoding="ascii", errors="ignore")
+        with obs_path.open("w", encoding="ascii", errors="ignore") as _f:
+            _f.write("".join(new_lines))
     except Exception:
         pass
 

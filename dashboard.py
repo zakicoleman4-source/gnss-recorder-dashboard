@@ -1043,8 +1043,7 @@ def _build_event_ts(df_in: pd.DataFrame) -> pd.Series:
 df["size_mb"] = df["size_bytes"] / (1024 * 1024)
 with st.spinner("Inferring event timestamps..."):
     df["event_ts_utc"] = _build_event_ts(df)
-# pandas>=3 prefers lowercase freq aliases
-df["event_hour_utc"] = df["event_ts_utc"].dt.floor("h")
+df["event_hour_utc"] = df["event_ts_utc"].dt.floor(pd.Timedelta(hours=1))
 
 # Prefer robust station inference if present in manifest.
 if "station" in df.columns:
@@ -1198,7 +1197,7 @@ with _safe_tab("Overview", tab_overview):
 
     win_start = pd.Timestamp(health_start, tz="UTC")
     win_end = pd.Timestamp(health_end, tz="UTC") + pd.Timedelta(hours=23)
-    hours = pd.date_range(win_start, win_end, freq="h", tz="UTC")
+    hours = pd.date_range(win_start, win_end, freq=pd.Timedelta(hours=1), tz="UTC")
     if len(hours) == 0:
         st.warning("Empty health window. Pick a wider range.")
         raise _SkipTab()
@@ -1346,7 +1345,7 @@ with _safe_tab("Station", tab_station):
         raise _SkipTab()
 
     sdf["event_ts"] = _to_tz(sdf["event_ts_utc"], tz_name)
-    sdf["event_hour"] = sdf["event_ts"].dt.floor("h")
+    sdf["event_hour"] = sdf["event_ts"].dt.floor(pd.Timedelta(hours=1))
 
     # Coverage range controls
     min_ts = sdf["event_hour"].min()
@@ -1373,7 +1372,7 @@ with _safe_tab("Station", tab_station):
     # Construct full hourly timeline in selected range
     start_ts = pd.Timestamp(start_date, tz=tz_name)
     end_ts = pd.Timestamp(end_date, tz=tz_name) + pd.Timedelta(hours=23)
-    full_hours = pd.date_range(start=start_ts, end=end_ts, freq="h", tz=tz_name)
+    full_hours = pd.date_range(start=start_ts, end=end_ts, freq=pd.Timedelta(hours=1), tz=tz_name)
     timeline = pd.DataFrame({"event_hour": full_hours})
     hour_counts = sdf.groupby("event_hour", as_index=False).agg(file_count=("file_name", "count"))
     timeline = timeline.merge(hour_counts, on="event_hour", how="left")
@@ -1671,7 +1670,7 @@ with _safe_tab("VRS", tab_vrs):
 
     start_ts = pd.Timestamp(start_day, tz="UTC")
     end_ts = pd.Timestamp(end_day, tz="UTC") + pd.Timedelta(hours=23)
-    full_hours = pd.date_range(start=start_ts, end=end_ts, freq="h", tz="UTC")
+    full_hours = pd.date_range(start=start_ts, end=end_ts, freq=pd.Timedelta(hours=1), tz="UTC")
     tl = pd.DataFrame({"event_hour_utc": full_hours})
     tl["dow"] = tl["event_hour_utc"].dt.dayofweek
     tl["hour"] = tl["event_hour_utc"].dt.hour
@@ -1789,7 +1788,7 @@ with _safe_tab("Map", tab_map):
     # Build per-station hourly timeline for the selected day
     day_start = pd.Timestamp(day, tz="UTC")
     day_end = day_start + pd.Timedelta(hours=23)
-    hours = pd.date_range(day_start, day_end, freq="h", tz="UTC")
+    hours = pd.date_range(day_start, day_end, freq=pd.Timedelta(hours=1), tz="UTC")
     dow = int(day_start.dayofweek)
     expected_hours_today = sorted([h for h in range(24) if (dow in expected_dows and h in expected_hours)])
 
