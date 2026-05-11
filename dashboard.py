@@ -1320,13 +1320,17 @@ with _safe_tab("Station", tab_station):
         raise _SkipTab()
     sdf["event_ts"] = _to_tz(sdf["event_ts_utc"], "UTC")
     sdf["event_hour"] = sdf["event_ts"].dt.floor(pd.Timedelta(hours=1))
+    sdf = sdf.dropna(subset=["event_hour"])
+    if sdf.empty:
+        st.warning(f"No valid timestamps for station '{station}'. The manifest may be corrupt.")
+        raise _SkipTab()
     min_ts = sdf["event_hour"].min()
     max_ts = sdf["event_hour"].max()
 
     # Reset date pickers when station changes so they reflect the new station's range.
     if st.session_state.get("_station_date_for") != station:
-        st.session_state["station_start_date"] = min_ts.date()
-        st.session_state["station_end_date"] = max_ts.date()
+        st.session_state["station_start_date"] = _safe_min_date(sdf["event_hour"])
+        st.session_state["station_end_date"]   = _safe_max_date(sdf["event_hour"])
         st.session_state["_station_date_for"] = station
     start_date = c2.date_input("From", key="station_start_date")
     end_date   = c3.date_input("To",   key="station_end_date")
