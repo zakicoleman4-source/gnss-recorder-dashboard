@@ -68,6 +68,12 @@ echo [gnss] If your browser does not open automatically, navigate to:
 echo [gnss]   http://localhost:!PORT!
 echo.
 cd /d "%ROOT%"
+if errorlevel 1 (
+  echo [gnss] ERROR: could not change to root directory: %ROOT%
+  echo [gnss] The install directory may have moved or the drive is offline.
+  pause >nul
+  exit /b 1
+)
 "%VENV%\Scripts\python.exe" -m streamlit run gnss-recorder-dashboard\dashboard.py --server.headless=true --browser.gatherUsageStats=false --server.port=!PORT!
 
 REM If we get here, Streamlit either exited cleanly or crashed. Either way

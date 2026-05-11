@@ -1164,7 +1164,7 @@ with _safe_tab("Overview", tab_overview):
     st.subheader("Dataset summary")
     col1, col2, col3, col4 = st.columns(4)
     col1.metric("Files", int(summary.get("files_in_manifest", len(df))))
-    col2.metric("Stations (prefixes)", int(summary.get("unique_prefixes", df["prefix"].nunique())))
+    col2.metric("Stations (prefixes)", int(summary.get("unique_prefixes", df[station_col].nunique())))
     col3.metric("Extensions", int(summary.get("unique_exts", df["ext"].nunique())))
     col4.metric("Total size (GB)", f"{(df['size_bytes'].sum() / (1024**3)):.2f}")
 
@@ -1824,6 +1824,10 @@ with _safe_tab("Map", tab_map):
     # Keep plot responsive: prefer stations with more files (more representative)
     plot_df["files"] = plot_df["files"].fillna(0).astype(int)
     plot_df = plot_df.sort_values(["files", "coverage_pct"], ascending=[False, True]).head(max_points)
+
+    if plot_df.empty:
+        st.info("No stations with coordinates match the current filters.")
+        raise _SkipTab()
 
     center, zoom = _auto_center_zoom(plot_df["lat"], plot_df["lon"])
     fig, kind = _scatter_map_compat(

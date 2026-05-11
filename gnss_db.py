@@ -13,7 +13,10 @@ class DbConfig:
 
 
 def connect(db_path: Path) -> sqlite3.Connection:
-    conn = sqlite3.connect(str(db_path), timeout=30)
+    try:
+        conn = sqlite3.connect(str(db_path), timeout=30)
+    except sqlite3.OperationalError as e:
+        raise RuntimeError(f"Cannot open database at {db_path}: {e}") from e
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL;")
     conn.execute("PRAGMA synchronous=NORMAL;")
