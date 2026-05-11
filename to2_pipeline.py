@@ -367,12 +367,13 @@ def _db_connect(db_path: Path) -> sqlite3.Connection:
     # isolation_level=None: pure autocommit — eliminates Python's implicit
     # transaction management which intermittently causes "database is locked"
     # when PRAGMA / DDL / DML are interleaved. Explicit BEGIN/COMMIT used in
-    # the scan loop for batching. WAL mode lets readers proceed during writes.
+    # the scan loop for batching.
+    # No journal_mode PRAGMA: DELETE mode (SQLite default) avoids the WAL
+    # conversion lock that kills writes on Windows when a stale -wal file exists.
     conn = sqlite3.connect(str(db_path), timeout=30, check_same_thread=False,
                            isolation_level=None)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA busy_timeout=30000;")
-    conn.execute("PRAGMA journal_mode=WAL;")
     conn.execute("PRAGMA synchronous=NORMAL;")
     return conn
 
@@ -899,6 +900,16 @@ def run_pipeline(cfg: PipelineConfig, progress_cb=None) -> Path:
     rinex_dir.mkdir(parents=True, exist_ok=True)
 
     exclude = [cfg.cache_dir]
+
+    # Pre-flight: any stale WAL/SHM file from a killed process blocks DELETE-mode
+    # writes with "database is locked" because SQLite needs exclusive access to
+    # resolve the orphaned WAL before it can write. Delete sidecars before
+    # connecting so we always open a clean DELETE-mode DB.
+    for _suf in ("-wal", "-shm", "-journal"):
+        try:
+            Path(str(db_path) + _suf).unlink()
+        except OSError:
+            pass
 
     _PIPELINE_LOCK.acquire()
     conn = None
