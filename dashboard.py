@@ -752,98 +752,89 @@ with st.sidebar:
 
         from to2_pipeline import PipelineConfig, export_manifests, run_pipeline
 
-        # Pre-flight: count matching files so it's obvious when the wrong folder
-        # level was chosen. Cap the walk so on a multi-million-file archive the
-        # pre-flight doesn't take longer than the actual scan.
-        PREFLIGHT_CAP = 100_000
-        match_count = None
-        match_capped = False
-        try:
-            from to2_pipeline import _iter_to_files  # type: ignore
-
-            n = 0
-            cache_resolved = cache_dir.resolve()
-            for _ in _iter_to_files(data_root.resolve(), exclude_dirs=[cache_resolved]):
-                n += 1
-                if n >= PREFLIGHT_CAP:
-                    match_capped = True
-                    break
-            match_count = n
-        except Exception:
+        if scan_clicked:
+            # Pre-flight file count: only run when user actually clicks Scan.
+            # Walking 100k files on every widget interaction is unnecessarily slow.
+            PREFLIGHT_CAP = 100_000
             match_count = None
+            match_capped = False
+            try:
+                from to2_pipeline import _iter_to_files  # type: ignore
 
-        if match_count is not None:
-            count_label = f"{match_count:,}{'+' if match_capped else ''}"
-            st.write(f"**Matching files found**: `{count_label}` (extensions: .TO2/.T02/.TO4/.T04)")
-            if match_capped:
-                st.info(
-                    f"Pre-flight stopped counting after {PREFLIGHT_CAP:,} files. The full scan will still process every match."
-                )
-            if not quick_probe and match_count < 200 and not match_capped:
-                st.warning(
-                    "This looks like a *subset* (very few matching files). You probably selected the wrong folder level. "
-                    "Pick the parent folder that contains all station/day subfolders.",
-                )
-            if quick_probe and match_count < 4:
-                st.warning("Very few matching files found. Probe mode may return almost nothing.")
-
-        prog = st.progress(0, text="Starting scan...")
-
-        def _cb(i: int, total: int, path: str) -> None:
-            pct = int((i / max(1, total)) * 100)
-            prog.progress(min(100, pct), text=f"Scanning {i}/{total}: {Path(path).name}")
-
-        cfg = PipelineConfig(
-            data_root=data_root.resolve(),
-            cache_dir=cache_dir.resolve(),
-            runpkr00_path=runpkr_path.resolve() if use_convert and runpkr_path.exists() else None,
-            convbin_path=convbin_path.resolve() if use_convert and convbin_path.exists() else None,
-            rnx2rtkp_path=rnx2rtkp_path.resolve() if rnx2rtkp_path.exists() else None,
-            station_coords_path=station_coords_path.resolve() if station_coords_path and station_coords_path.exists() else None,
-            max_files_per_station=1 if quick_probe else None,
-            # Probe: stop after first success per station (fast metadata).
-            # Full: process every file (coverage stats need all files).
-            stop_after_success_per_station=bool(quick_probe),
-            convert_cmd_template=os.environ.get("GNSS_CONVERT_CMD") or None,
-        )
-        with st.spinner("Scanning and caching results..."):
-            if force_rescan:
-                # Delete the cache DB AND the converted RINEX dir so a forced rescan is
-                # truly deterministic. Errors here are not fatal -- run_pipeline will
-                # recreate everything it needs.
-                # NOTE: we use WAL mode, which leaves -wal and -shm sidecars next to
-                # the .sqlite file. If we delete the main DB but leave those, sqlite
-                # can revive a stale snapshot on the next open. Sweep all 3.
-                import shutil as _shutil
+                n = 0
                 cache_resolved = cache_dir.resolve()
-                for sidecar in (
-                    "scan_cache.sqlite",
-                    "scan_cache.sqlite-wal",
-                    "scan_cache.sqlite-shm",
-                    "scan_cache.sqlite-journal",
-                ):
+                for _ in _iter_to_files(data_root.resolve(), exclude_dirs=[cache_resolved]):
+                    n += 1
+                    if n >= PREFLIGHT_CAP:
+                        match_capped = True
+                        break
+                match_count = n
+            except Exception:
+                match_count = None
+
+            if match_count is not None:
+                count_label = f"{match_count:,}{'+' if match_capped else ''}"
+                st.write(f"**Matching files found**: `{count_label}` (extensions: .TO2/.T02/.TO4/.T04)")
+                if match_capped:
+                    st.info(
+                        f"Pre-flight stopped counting after {PREFLIGHT_CAP:,} files. The full scan will still process every match."
+                    )
+                if not quick_probe and match_count < 200 and not match_capped:
+                    st.warning(
+                        "This looks like a *subset* (very few matching files). You probably selected the wrong folder level. "
+                        "Pick the parent folder that contains all station/day subfolders.",
+                    )
+                if quick_probe and match_count < 4:
+                    st.warning("Very few matching files found. Probe mode may return almost nothing.")
+
+        if scan_clicked:
+            prog = st.progress(0, text="Starting scan...")
+
+            def _cb(i: int, total: int, path: str) -> None:
+                pct = int((i / max(1, total)) * 100)
+                prog.progress(min(100, pct), text=f"Scanning {i}/{total}: {Path(path).name}")
+
+            cfg = PipelineConfig(
+                data_root=data_root.resolve(),
+                cache_dir=cache_dir.resolve(),
+                runpkr00_path=runpkr_path.resolve() if use_convert and runpkr_path.exists() else None,
+                convbin_path=convbin_path.resolve() if use_convert and convbin_path.exists() else None,
+                rnx2rtkp_path=rnx2rtkp_path.resolve() if rnx2rtkp_path.exists() else None,
+                station_coords_path=station_coords_path.resolve() if station_coords_path and station_coords_path.exists() else None,
+                max_files_per_station=1 if quick_probe else None,
+                stop_after_success_per_station=bool(quick_probe),
+                convert_cmd_template=os.environ.get("GNSS_CONVERT_CMD") or None,
+            )
+            with st.spinner("Scanning and caching results..."):
+                if force_rescan:
+                    import shutil as _shutil
+                    cache_resolved = cache_dir.resolve()
+                    for sidecar in (
+                        "scan_cache.sqlite",
+                        "scan_cache.sqlite-wal",
+                        "scan_cache.sqlite-shm",
+                        "scan_cache.sqlite-journal",
+                    ):
+                        try:
+                            p = cache_resolved / sidecar
+                            if p.exists():
+                                p.unlink()
+                        except Exception:
+                            pass
                     try:
-                        p = cache_resolved / sidecar
-                        if p.exists():
-                            p.unlink()
+                        rinex_old = cache_resolved / "rinex"
+                        if rinex_old.exists():
+                            _shutil.rmtree(rinex_old, ignore_errors=True)
                     except Exception:
                         pass
-                try:
-                    rinex_old = cache_resolved / "rinex"
-                    if rinex_old.exists():
-                        _shutil.rmtree(rinex_old, ignore_errors=True)
-                except Exception:
-                    pass
-                # Also bust any Streamlit caches that reference the old manifest
-                # (download buttons, manifest CSV cache, etc.).
-                try:
-                    st.cache_data.clear()
-                except Exception:
-                    pass
-            db_path = run_pipeline(cfg, progress_cb=_cb)
-            manifests_dir = export_manifests(db_path, out_dir=cache_dir.resolve() / "exported")
-            st.session_state["_gnss_last_scan_manifests_dir"] = str(manifests_dir.resolve())
-            st.session_state["_gnss_last_scan_cache_key"] = scan_cache_key
+                    try:
+                        st.cache_data.clear()
+                    except Exception:
+                        pass
+                db_path = run_pipeline(cfg, progress_cb=_cb)
+                manifests_dir = export_manifests(db_path, out_dir=cache_dir.resolve() / "exported")
+                st.session_state["_gnss_last_scan_manifests_dir"] = str(manifests_dir.resolve())
+                st.session_state["_gnss_last_scan_cache_key"] = scan_cache_key
         # Post-flight summary: make it obvious what happened.
         sum_path = manifests_dir / "summary.json"
         if sum_path.exists():
