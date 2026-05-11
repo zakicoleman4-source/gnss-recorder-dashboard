@@ -362,13 +362,11 @@ def _file_sig(p: Path) -> tuple[int, int]:
 
 
 def _db_connect(db_path: Path) -> sqlite3.Connection:
-    # DELETE journal mode — simpler, more reliable on Windows than WAL.
-    # WAL leaves -wal/-shm files that cause lock races across Streamlit threads.
     conn = sqlite3.connect(str(db_path), timeout=30, check_same_thread=False)
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=DELETE;")
-    conn.execute("PRAGMA synchronous=NORMAL;")
+    # busy_timeout must come before any write — including journal_mode change.
     conn.execute("PRAGMA busy_timeout=30000;")
+    conn.execute("PRAGMA synchronous=NORMAL;")
     return conn
 
 
