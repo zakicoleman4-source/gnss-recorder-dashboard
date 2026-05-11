@@ -48,12 +48,17 @@ if "%PYMM%"=="" (
 echo [gnss] Detected: Python %PYMM%
 echo [gnss] Detected: Python %PYMM%>>"%LOG%"
 
+REM pandas>=2.2 / numpy>=1.26 require Python 3.9.
+REM Current latest packages (pandas 3.x, numpy 2.x, streamlit 1.57) require Python 3.11.
+REM pip resolves the right version automatically -- just block truly unsupported Pythons.
+if "%PYMM%"=="3.6" goto PY_TOO_OLD
+if "%PYMM%"=="3.7" goto PY_TOO_OLD
 if "%PYMM%"=="3.8" goto PY_TOO_OLD
-if "%PYMM%"=="3.9" goto PY_TOO_OLD
 goto PY_OK
 
 :PY_TOO_OLD
-echo [gnss] ERROR: Python %PYMM% too old. Requires 3.10 or newer.
+echo [gnss] ERROR: Python %PYMM% too old. Requires 3.9 or newer (3.11+ recommended).
+echo [gnss] Install Python 3.11+ from https://www.python.org/downloads/windows/
 echo [gnss] ERROR: Python too old (%PYMM%)>>"%LOG%"
 pause >nul
 exit /b 1

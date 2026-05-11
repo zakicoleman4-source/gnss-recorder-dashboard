@@ -1044,11 +1044,6 @@ def run_pipeline(cfg: PipelineConfig, progress_cb=None) -> Path:
                                     station_coords[station] = (lat, lon, h_m)
                                     _patch_rinex_approx_pos(rinex_obs, lat, lon, h_m)
 
-                        # ── Apply cached SPP result to later files same station ─
-                        elif lat is None and station in station_coords:
-                            lat, lon, h_m = station_coords[station]
-                            _patch_rinex_approx_pos(rinex_obs, lat, lon, h_m)
-
                         # ── Epoch-level statistics ─────────────────────────
                         ep = _parse_rinex_epochs(rinex_obs)
                         interval_s           = ep.get("interval_s")
