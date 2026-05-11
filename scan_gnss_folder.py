@@ -11,7 +11,7 @@ import zipfile
 import bz2
 import struct
 import subprocess
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, fields
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable, Optional, Tuple, Set, Dict, List
@@ -910,7 +910,7 @@ def main() -> int:
 
     csv_path = manifests_dir / "files_manifest.csv"
     with csv_path.open("w", newline="", encoding="utf-8") as f:
-        fieldnames = list(asdict(records[0]).keys()) if records else list(asdict(FileRecord("", "", "", 0, "", "", None)).keys())
+        fieldnames = list(asdict(records[0]).keys()) if records else [f.name for f in fields(FileRecord)]
         w = csv.DictWriter(f, fieldnames=fieldnames)
         w.writeheader()
         for r in records:

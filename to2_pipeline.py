@@ -191,6 +191,81 @@ def _station_from_filename(name: str) -> str:
     return m.group(1).upper()
 
 
+# ── Filename timestamp parsing ────────────────────────────────────────────────
+# Trimble T02/TO2 files embed the recording start time in the filename.
+# Two common layouts:
+#   MMDD layout: SSSSYYYYMMDDHH[MM[SS]][a].T02  e.g. AHTI202603010000a.T02
+#   DOY  layout: SSSSYYYYDDDHHMMSS[a].T02       e.g. AHTI20260600000a.T02
+
+_FN_DT_MMDD = re.compile(
+    r"[A-Za-z]{0,4}"              # station prefix (0–4 letters, may be absent)
+    r"((?:19|20)\d{2})"           # year (4 digits)
+    r"(0[1-9]|1[0-2])"            # month 01–12
+    r"(0[1-9]|[12]\d|3[01])"      # day 01–31
+    r"([01]\d|2[0-3])"            # hour 00–23
+    r"\d{2}"                      # minute (ignored)
+    r"(?:\d{2})?"                 # optional second
+    r"[a-zA-Z]?"                  # optional session letter (Trimble convention)
+    r"(?=\.)",                    # lookahead: must be followed by extension dot
+    re.IGNORECASE,
+)
+
+_FN_DT_DOY = re.compile(
+    r"[A-Za-z]{0,4}"
+    r"((?:19|20)\d{2})"           # year
+    r"(00[1-9]|0[1-9]\d|[12]\d{2}|3[0-5]\d|36[0-6])"  # day-of-year 001–366
+    r"([01]\d|2[0-3])"            # hour
+    r"\d{2}"                      # minute
+    r"(?:\d{2})?"                 # optional second
+    r"[a-zA-Z]?"
+    r"(?=\.)",
+    re.IGNORECASE,
+)
+
+
+def _parse_filename_dt(name: str) -> tuple[Optional[str], Optional[int]]:
+    """
+    Return ``(iso_date, hour)`` parsed from a Trimble T02 filename, or
+    ``(None, None)`` if the filename does not match a known layout.
+
+    Tries MMDD layout first (most common), then DOY layout.
+    """
+    import datetime as _dt
+
+    m = _FN_DT_MMDD.search(name)
+    if m:
+        try:
+            y, mo, d, h = int(m.group(1)), int(m.group(2)), int(m.group(3)), int(m.group(4))
+            date_str = _dt.date(y, mo, d).isoformat()
+            return date_str, h
+        except (ValueError, OverflowError):
+            pass
+
+    m = _FN_DT_DOY.search(name)
+    if m:
+        try:
+            y, doy, h = int(m.group(1)), int(m.group(2)), int(m.group(3))
+            date_str = (_dt.date(y, 1, 1) + _dt.timedelta(days=doy - 1)).isoformat()
+            return date_str, h
+        except (ValueError, OverflowError):
+            pass
+
+    return None, None
+
+
+def _duration_s(t_first: Optional[str], t_last: Optional[str]) -> Optional[float]:
+    """Seconds between two ISO-format UTC timestamps; None if either is missing."""
+    if not t_first or not t_last:
+        return None
+    try:
+        a = pd.Timestamp(t_first, tz="UTC")
+        b = pd.Timestamp(t_last, tz="UTC")
+        diff = (b - a).total_seconds()
+        return diff if diff >= 0 else None
+    except Exception:
+        return None
+
+
 def _file_sig(p: Path) -> tuple[int, int]:
     try:
         st = p.stat()
@@ -226,13 +301,29 @@ def _db_init(conn: sqlite3.Connection) -> None:
           signals TEXT,
           convert_status TEXT,
           convert_detail TEXT,
+          filename_date TEXT,
+          filename_hour INTEGER,
+          duration_s REAL,
           updated_at TEXT NOT NULL
         );
 
         CREATE INDEX IF NOT EXISTS idx_files_station_first ON files(station, time_first_obs);
+        CREATE INDEX IF NOT EXISTS idx_files_station_date  ON files(station, filename_date, filename_hour);
         """
     )
     conn.commit()
+    # Migrate existing DBs that pre-date these columns (ALTER TABLE is a no-op if
+    # the column already exists in SQLite >= 3.37; for older SQLite we catch and ignore).
+    for col, typedef in [
+        ("filename_date", "TEXT"),
+        ("filename_hour", "INTEGER"),
+        ("duration_s",    "REAL"),
+    ]:
+        try:
+            conn.execute(f"ALTER TABLE files ADD COLUMN {col} {typedef}")
+            conn.commit()
+        except sqlite3.OperationalError:
+            pass  # column already exists
 
 
 def _read_rinex_header_lines(path: Path, max_bytes: int = 256 * 1024) -> list[str]:
@@ -689,6 +780,7 @@ def run_pipeline(cfg: PipelineConfig, progress_cb=None) -> Path:
                 progress_cb(i, total, str(p))
 
             station = _station_from_filename(p.name)
+            fn_date, fn_hour = _parse_filename_dt(p.name)
 
             # Optional quick-probe mode: only try a small number of files per station,
             # and (by default) stop after first successful conversion per station.
@@ -710,6 +802,7 @@ def run_pipeline(cfg: PipelineConfig, progress_cb=None) -> Path:
                     t_first = t_last = None
                     lat = lon = h_m = None
                     consts = sigs = None
+                    dur_s = None
                     skipped_empty += 1
                 else:
                     row = conn.execute("SELECT size_bytes, mtime FROM files WHERE path=?", (str(p),)).fetchone()
@@ -748,6 +841,7 @@ def run_pipeline(cfg: PipelineConfig, progress_cb=None) -> Path:
                     t_first = t_last = None
                     lat = lon = h_m = None
                     consts = sigs = None
+                    dur_s = None
                     if rinex_obs and rinex_obs.exists():
                         lines = _read_rinex_header_lines(rinex_obs)
                         for ln in lines:
@@ -767,6 +861,7 @@ def run_pipeline(cfg: PipelineConfig, progress_cb=None) -> Path:
                                     except ZeroDivisionError:
                                         lat = lon = h_m = None
                         consts, sigs = _parse_rinex_signals(lines)
+                        dur_s = _duration_s(t_first, t_last)
             except Exception as e:
                 # Record failure for this file and continue.
                 size_b, mtime = _file_sig(p)
@@ -777,6 +872,7 @@ def run_pipeline(cfg: PipelineConfig, progress_cb=None) -> Path:
                 t_first = t_last = None
                 lat = lon = h_m = None
                 consts = sigs = None
+                dur_s = None
                 failed += 1
             processed += 1
 
@@ -789,9 +885,10 @@ def run_pipeline(cfg: PipelineConfig, progress_cb=None) -> Path:
                       lat, lon, height_m,
                       constellations, signals,
                       convert_status, convert_detail,
+                      filename_date, filename_hour, duration_s,
                       updated_at
                     )
-                    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                     ON CONFLICT(path) DO UPDATE SET
                       station=excluded.station,
                       size_bytes=excluded.size_bytes,
@@ -806,6 +903,9 @@ def run_pipeline(cfg: PipelineConfig, progress_cb=None) -> Path:
                       signals=excluded.signals,
                       convert_status=excluded.convert_status,
                       convert_detail=excluded.convert_detail,
+                      filename_date=excluded.filename_date,
+                      filename_hour=excluded.filename_hour,
+                      duration_s=excluded.duration_s,
                       updated_at=excluded.updated_at
                     """,
                     (
@@ -823,6 +923,9 @@ def run_pipeline(cfg: PipelineConfig, progress_cb=None) -> Path:
                         sigs,
                         convert_status,
                         convert_detail,
+                        fn_date,
+                        fn_hour,
+                        dur_s,
                         _utc_now_iso(),
                     ),
                 )
@@ -861,6 +964,85 @@ def run_pipeline(cfg: PipelineConfig, progress_cb=None) -> Path:
     return db_path
 
 
+def _generate_coverage_gaps(df: pd.DataFrame, out_path: Path) -> None:
+    """
+    Write coverage_gaps.csv: per-station contiguous blocks of missing hourly slots.
+
+    Uses ``filename_date`` + ``filename_hour`` columns (parsed from filenames).
+    Only considers the date range actually observed per station so the output
+    doesn't balloon on archives with sparse coverage.
+
+    Columns: station, gap_start_utc, gap_end_utc, gap_hours
+    """
+    gap_cols = ["station", "gap_start_utc", "gap_end_utc", "gap_hours"]
+    empty = pd.DataFrame(columns=gap_cols)
+
+    needed = {"station", "filename_date", "filename_hour"}
+    if df.empty or not needed.issubset(df.columns):
+        empty.to_csv(out_path, index=False)
+        return
+
+    tdf = df[df["filename_date"].notna() & df["filename_hour"].notna()].copy()
+    if tdf.empty:
+        empty.to_csv(out_path, index=False)
+        return
+
+    tdf["filename_date"] = tdf["filename_date"].astype(str)
+    tdf["filename_hour"] = tdf["filename_hour"].astype(int)
+
+    # Build set of covered (station, date, hour) triples.
+    covered: set[tuple[str, str, int]] = set(
+        zip(tdf["station"], tdf["filename_date"], tdf["filename_hour"])
+    )
+
+    gap_rows: list[dict] = []
+    for station, sdf in tdf.groupby("station"):
+        try:
+            min_ts = pd.Timestamp(sdf["filename_date"].min())
+            max_ts = pd.Timestamp(sdf["filename_date"].max())
+        except Exception:
+            continue
+
+        # Iterate every hour from first to last day.
+        cur = min_ts
+        end = max_ts + pd.Timedelta(hours=23)
+        gap_start: Optional[pd.Timestamp] = None
+
+        while cur <= end:
+            date_str = cur.date().isoformat()
+            hour = cur.hour
+            has_file = (station, date_str, hour) in covered
+            if not has_file:
+                if gap_start is None:
+                    gap_start = cur
+            else:
+                if gap_start is not None:
+                    gap_end = cur - pd.Timedelta(hours=1)
+                    gap_hours = int((cur - gap_start).total_seconds() / 3600)
+                    gap_rows.append({
+                        "station": station,
+                        "gap_start_utc": gap_start.isoformat(),
+                        "gap_end_utc": gap_end.isoformat(),
+                        "gap_hours": gap_hours,
+                    })
+                    gap_start = None
+            cur += pd.Timedelta(hours=1)
+
+        # Close any gap still open at the end of the range.
+        if gap_start is not None:
+            gap_end = end
+            gap_hours = int((end - gap_start).total_seconds() / 3600) + 1
+            gap_rows.append({
+                "station": station,
+                "gap_start_utc": gap_start.isoformat(),
+                "gap_end_utc": gap_end.isoformat(),
+                "gap_hours": gap_hours,
+            })
+
+    result = pd.DataFrame(gap_rows, columns=gap_cols) if gap_rows else empty
+    result.to_csv(out_path, index=False)
+
+
 def export_manifests(db_path: Path, out_dir: Path) -> Path:
     """
     Export scan cache SQLite into the existing manifests format expected by dashboard.py:
@@ -882,7 +1064,9 @@ def export_manifests(db_path: Path, out_dir: Path) -> Path:
               size_bytes,
               datetime(mtime, 'unixepoch') as modified_utc,
               path as discovered_from,
-              NULL as inferred_date,
+              filename_date as inferred_date,
+              filename_hour,
+              duration_s,
               NULL as rinex_version,
               NULL as rinex_file_type,
               constellations,
@@ -911,7 +1095,8 @@ def export_manifests(db_path: Path, out_dir: Path) -> Path:
         # code (and the dashboard) doesn't KeyError on the first column access.
         expected_cols = [
             "station", "prefix", "file_name", "ext", "size_bytes", "modified_utc",
-            "discovered_from", "inferred_date", "rinex_version", "rinex_file_type",
+            "discovered_from", "inferred_date", "filename_hour", "duration_s",
+            "rinex_version", "rinex_file_type",
             "constellations", "signals", "lat", "lon", "height_m",
             "ecef_x", "ecef_y", "ecef_z",
         ]
@@ -923,6 +1108,8 @@ def export_manifests(db_path: Path, out_dir: Path) -> Path:
 
     csv_path = manifests / "files_manifest.csv"
     df.to_csv(csv_path, index=False)
+
+    _generate_coverage_gaps(df, manifests / "coverage_gaps.csv")
 
     if df.empty:
         by_station: dict = {}
@@ -955,6 +1142,7 @@ def export_manifests(db_path: Path, out_dir: Path) -> Path:
         "prefix_regex": STATION_RE.pattern,
         "parse_rinex_headers": True,
         "source": str(db_path),
+        "coverage_gaps_csv": str(manifests / "coverage_gaps.csv"),
     }
     (manifests / "summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")  # type: ignore[name-defined]
     return manifests
