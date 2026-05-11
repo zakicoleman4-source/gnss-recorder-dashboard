@@ -31,10 +31,15 @@ if not exist "%STREAMLIT_CFG_DIR%\credentials.toml" (
   >> "%STREAMLIT_CFG_DIR%\credentials.toml" echo email = ""
 )
 
-REM runpkr00 -- the dashboard reads GNSS_RUNPKR00 to pre-fill the
-REM tool path in the UI, saving the operator from typing it manually.
+REM runpkr00 and rtklib tools -- dashboard reads these env vars to pre-fill paths.
 if exist "%ROOT%\gnss-recorder-dashboard\tools\runpkr00\runpkr00.exe" (
   set "GNSS_RUNPKR00=%ROOT%\gnss-recorder-dashboard\tools\runpkr00\runpkr00.exe"
+)
+if exist "%ROOT%\gnss-recorder-dashboard\tools\rtklib\convbin.exe" (
+  set "GNSS_CONVBIN=%ROOT%\gnss-recorder-dashboard\tools\rtklib\convbin.exe"
+)
+if exist "%ROOT%\gnss-recorder-dashboard\tools\rtklib\rnx2rtkp.exe" (
+  set "GNSS_RNX2RTKP=%ROOT%\gnss-recorder-dashboard\tools\rtklib\rnx2rtkp.exe"
 )
 
 REM Make local modules importable regardless of working directory.

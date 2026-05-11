@@ -34,6 +34,7 @@ class PipelineConfig:
     probe_max_total_files: int = 200_000
     convert_cmd_template: Optional[str] = None
     station_coords_path: Optional[Path] = None  # CSV: station,lat,lon,height_m
+    rnx2rtkp_path: Optional[Path] = None        # rnx2rtkp.exe for SPP coord solve
 
 
 def _utc_now_iso() -> str:
@@ -719,21 +720,25 @@ def _runpkr00_make_dat(
 
 def _convbin_on_dat(convbin_path: Path, dat: Path, obs_path: Path) -> None:
     """
-    Convert runpkr00 .dat (RT17 format) → RINEX 3 obs using convbin.
+    Convert runpkr00 .dat (RT17 format) → RINEX 3 obs + nav using convbin.
+    Nav file is written alongside obs with .nav extension (used by SPP solver).
     Raises ConverterError on failure.
     """
-    try:
-        obs_path.unlink(missing_ok=True)
-    except OSError:
-        pass
+    nav_path = obs_path.with_suffix(".nav")
+    for fp in (obs_path, nav_path):
+        try:
+            fp.unlink(missing_ok=True)
+        except OSError:
+            pass
     try:
         p = subprocess.run(
             [
                 str(convbin_path), "-r", "rt17",
                 str(dat),
                 "-o", str(obs_path),
+                "-n", str(nav_path),  # nav (mixed) alongside obs
                 "-v", "3.04",
-                "-os",          # include SNR
+                "-os",                # include SNR
             ],
             cwd=str(obs_path.parent),
             capture_output=True, text=True, timeout=180, check=False,
@@ -745,6 +750,73 @@ def _convbin_on_dat(convbin_path: Path, dat: Path, obs_path: Path) -> None:
         raise ConverterError(f"convbin failed to launch: {e}")
     if not (obs_path.exists() and obs_path.stat().st_size > 0):
         raise ConverterError(f"convbin produced no non-empty obs ({_short_err(p)})")
+
+
+def _rnx2rtkp_spp(
+    rnx2rtkp_path: Path,
+    obs_path: Path,
+    nav_path: Path,
+) -> Optional[tuple[float, float, float]]:
+    """
+    Single-point position solve on one obs+nav RINEX pair.
+    Returns median (lat_deg, lon_deg, height_m) over all valid epochs, or None.
+    Never raises. Cleans up temp .pos file.
+    """
+    pos_path = obs_path.with_suffix(".spp.pos")
+    try:
+        pos_path.unlink(missing_ok=True)
+    except OSError:
+        pass
+    try:
+        subprocess.run(
+            [
+                str(rnx2rtkp_path),
+                "-p", "0",    # single-point
+                "-m", "10",   # 10° elevation mask
+                "-o", str(pos_path),
+                str(obs_path),
+                str(nav_path),
+            ],
+            capture_output=True, text=True, timeout=120, check=False,
+            **_SUBPROC_KW,
+        )
+    except Exception:
+        return None
+
+    lats: list[float] = []
+    lons: list[float] = []
+    hgts: list[float] = []
+    try:
+        for line in pos_path.read_text(encoding="ascii", errors="ignore").splitlines():
+            line = line.strip()
+            if not line or line.startswith("%"):
+                continue
+            parts = line.split()
+            if len(parts) < 7:
+                continue
+            try:
+                lat = float(parts[2])
+                lon = float(parts[3])
+                hgt = float(parts[4])
+                q   = int(parts[5])
+                if q > 0 and -90.0 <= lat <= 90.0 and -180.0 <= lon <= 180.0:
+                    lats.append(lat)
+                    lons.append(lon)
+                    hgts.append(hgt)
+            except Exception:
+                continue
+    except Exception:
+        return None
+    finally:
+        try:
+            pos_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+    if not lats:
+        return None
+    mid = len(lats) // 2
+    return sorted(lats)[mid], sorted(lons)[mid], sorted(hgts)[mid]
 
 
 
@@ -848,6 +920,10 @@ def run_pipeline(cfg: PipelineConfig, progress_cb=None) -> Path:
             except Exception:
                 pass
 
+        # Tracks stations where SPP was already attempted this run (success or fail).
+        # One attempt per station — use the result for every subsequent file.
+        station_spp_done: set[str] = set()
+
         attempted_by_station: dict[str, int] = {}
         success_by_station: set[str] = set()
         cache_hits = 0
@@ -948,8 +1024,28 @@ def run_pipeline(cfg: PipelineConfig, progress_cb=None) -> Path:
                         consts, sigs = _parse_rinex_signals(hdr_lines)
                         dur_s = _duration_s(t_first, t_last)
 
-                        # ── Inject coords from override file if header had none ──
+                        # ── Inject coords if header had none ─────────────────
                         if lat is None and station in station_coords:
+                            lat, lon, h_m = station_coords[station]
+                            _patch_rinex_approx_pos(rinex_obs, lat, lon, h_m)
+
+                        # ── SPP solve (one attempt per station per run) ────────
+                        if (
+                            lat is None
+                            and station not in station_spp_done
+                            and cfg.rnx2rtkp_path and cfg.rnx2rtkp_path.exists()
+                        ):
+                            station_spp_done.add(station)
+                            nav_path = rinex_obs.with_suffix(".nav")
+                            if nav_path.exists() and nav_path.stat().st_size > 0:
+                                spp = _rnx2rtkp_spp(cfg.rnx2rtkp_path, rinex_obs, nav_path)
+                                if spp is not None:
+                                    lat, lon, h_m = spp
+                                    station_coords[station] = (lat, lon, h_m)
+                                    _patch_rinex_approx_pos(rinex_obs, lat, lon, h_m)
+
+                        # ── Apply cached SPP result to later files same station ─
+                        elif lat is None and station in station_coords:
                             lat, lon, h_m = station_coords[station]
                             _patch_rinex_approx_pos(rinex_obs, lat, lon, h_m)
 
