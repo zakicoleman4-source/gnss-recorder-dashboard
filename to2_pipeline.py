@@ -28,8 +28,9 @@ TO_EXTS = {".to2", ".t02", ".to4", ".t04", ".t00", ".t01"}
 # Match station prefix before an embedded year (19xx/20xx) or a 3-digit DOY+hour-letter.
 # Handles alpha stations (AHTI), numeric VRS stations (2406), and RINEX2-style names (INVK119a).
 STATION_RE = re.compile(r"^([A-Za-z0-9]{3,9})(?=(?:19|20)\d{2}|\d{3}[a-xA-X])", re.IGNORECASE)
-# Fallback: client files may have reliable 3-4 char prefix but unreliable date suffix
-_STATION_PREFIX_RE = re.compile(r"^([A-Za-z][A-Za-z0-9]{2,3})", re.IGNORECASE)
+# Fallback: client files may have reliable 3-4 char prefix but unreliable date suffix.
+# Allows _ and . inside code (e.g. AH_I, A.HTI); strips trailing _ . after match.
+_STATION_PREFIX_RE = re.compile(r"^([A-Za-z0-9][A-Za-z0-9_.]{2,3})", re.IGNORECASE)
 
 _THIS_DIR = Path(__file__).resolve().parent
 
@@ -137,9 +138,13 @@ def _station_from_filename(name: str) -> str:
     m = STATION_RE.match(name)
     if m:
         return m.group(1).upper()
-    # Fallback: first 3-4 chars when date suffix doesn't match expected pattern
+    # Fallback: first 3-4 chars; strip trailing _ . (separators, not part of code)
     m = _STATION_PREFIX_RE.match(name)
-    return m.group(1).upper() if m else "UNKNOWN"
+    if m:
+        code = m.group(1).upper().rstrip("_.")
+        if len(code) >= 3:
+            return code
+    return "UNKNOWN"
 
 
 # ── Filename timestamp parsing ────────────────────────────────────────────────
@@ -1514,8 +1519,28 @@ def run_pipeline(cfg: PipelineConfig, progress_cb=None) -> Path:
                                         lat, lon, h_m = _ecef_to_llh_wgs84(*xyz)
                                     except ZeroDivisionError:
                                         lat = lon = h_m = None
+                            if "INTERVAL" in ln and interval_s is None:
+                                try:
+                                    interval_s = _snap_interval(float(ln[:60].strip()))
+                                except (ValueError, TypeError):
+                                    pass
+                            if "MARKER NAME" in ln:
+                                raw = ln[:60].strip()
+                                if raw:
+                                    clean = re.sub(r"[^A-Z0-9_.]", "", raw.upper())[:8]
+                                    if len(clean) >= 3 and clean != station:
+                                        station = clean
                         consts, sigs = _parse_rinex_signals(hdr_lines)
                         dur_s = _duration_s(t_first, t_last)
+
+                        # ── Backfill fn_date/fn_hour from RINEX when filename gave nothing ──
+                        if fn_date is None and t_first:
+                            try:
+                                _dt = pd.Timestamp(t_first)
+                                fn_date = _dt.date().isoformat()
+                                fn_hour = _dt.hour
+                            except Exception:
+                                pass
 
                         # ── Inject coords if header had none ─────────────────
                         if lat is None and station in station_coords:

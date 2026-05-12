@@ -86,16 +86,19 @@ _STATION_RE = re.compile(
     r"^([A-Za-z0-9]{3,9})(?=(?:19|20)\d{2}|\d{3}[a-xA-X])", re.IGNORECASE
 )
 
-_STATION_PREFIX_RE = re.compile(r"^([A-Za-z][A-Za-z0-9]{2,3})", re.IGNORECASE)
+_STATION_PREFIX_RE = re.compile(r"^([A-Za-z0-9][A-Za-z0-9_.]{2,3})", re.IGNORECASE)
 
 def _station_from_filename(name: str) -> Optional[str]:
     m = _STATION_RE.match(name)
     if m:
         return m.group(1).upper()
-    # Fallback: first 3-4 chars — client filenames have reliable station prefix
-    # but unreliable date suffix that prevents STATION_RE lookahead from matching
+    # Fallback: first 3-4 chars; strip trailing _ . (separators, not part of code)
     m = _STATION_PREFIX_RE.match(name)
-    return m.group(1).upper() if m else None
+    if m:
+        code = m.group(1).upper().rstrip("_.")
+        if len(code) >= 3:
+            return code
+    return None
 
 
 # ---------------------------------------------------------------------------
