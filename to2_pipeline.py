@@ -1320,6 +1320,7 @@ def export_manifests(db_path: Path, out_dir: Path) -> Path:
     manifests.mkdir(parents=True, exist_ok=True)
 
     conn = _db_connect(db_path)
+    _db_init(conn)
     try:
         rows = conn.execute(
             """
