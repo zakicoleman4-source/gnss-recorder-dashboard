@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import bz2
+import datetime
 import os
 import re
 import sys
@@ -78,6 +79,31 @@ def _ecef_to_llh(x: float, y: float, z: float):
     N = a / math.sqrt(1 - e2 * math.sin(lat) ** 2)
     h = p / math.cos(lat) - N if abs(math.cos(lat)) > 1e-10 else abs(z) / math.sin(lat) - N * (1 - e2)
     return math.degrees(lat), math.degrees(lon), h
+
+
+# ---------------------------------------------------------------------------
+# Filename date extraction (GeoNet: SSSS_YYYYDDDHHMM_*  or  SSSSYYYYMMDDHHMMSS_*)
+# ---------------------------------------------------------------------------
+def _date_from_filename(stem: str) -> Optional[str]:
+    # YYYYMMDD + 2-digit hour anywhere in stem
+    m = re.search(r"(20\d{2})(0[1-9]|1[0-2])(0[1-9]|[12]\d|3[01])(\d{2})", stem)
+    if m:
+        try:
+            dt = datetime.datetime(int(m.group(1)), int(m.group(2)), int(m.group(3)), int(m.group(4)))
+            return dt.strftime("%Y-%m-%dT%H:00:00")
+        except ValueError:
+            pass
+    # YYYY + 3-digit DOY + 2-digit hour
+    m = re.search(r"(20\d{2})(\d{3})(\d{2})", stem)
+    if m:
+        try:
+            year, doy, hour = int(m.group(1)), int(m.group(2)), int(m.group(3))
+            if 1 <= doy <= 366 and 0 <= hour <= 23:
+                dt = datetime.datetime(year, 1, 1) + datetime.timedelta(days=doy - 1)
+                return f"{dt.strftime('%Y-%m-%d')}T{hour:02d}:00:00"
+        except (ValueError, OverflowError):
+            pass
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -213,6 +239,10 @@ def probe_file(path: Path) -> dict:
 
     result["bzip2_blocks_found"] = blocks
 
+    # Filename fallback for session_start when header doesn't embed it
+    if result["session_start"] is None:
+        result["session_start"] = _date_from_filename(path.stem)
+
     # Classify format based on receiver model
     rx = (result["receiver_model"] or "").lower()
     if any(m in rx for m in _RT27_MARKERS):
@@ -234,7 +264,7 @@ def main() -> None:
     ap = argparse.ArgumentParser(description="Probe Trimble T02/T04 files and report what you have.")
     ap.add_argument("folder", help="Root folder to scan recursively")
     ap.add_argument("--out", default="t02_probe_results.csv", help="Output CSV path (default: t02_probe_results.csv)")
-    ap.add_argument("--workers", type=int, default=16, help="Parallel threads (default: 16)")
+    ap.add_argument("--workers", type=int, default=min(16, os.cpu_count() or 4), help="Parallel workers (default: min(16, cpu_count))")
     ap.add_argument("--limit", type=int, default=0, help="Max files to probe (0 = all)")
     args = ap.parse_args()
 
@@ -277,7 +307,7 @@ def main() -> None:
     try:
         import pandas as pd
         df = pd.DataFrame(results)
-        df.to_csv(args.out, index=False)
+        df.to_csv(args.out, index=False, encoding="utf-8")
         print(f"Full results -> {args.out}")
     except ImportError:
         import csv
@@ -304,7 +334,7 @@ def main() -> None:
     label_map = {
         "rt27":               "RT27/Alloy (convertToRinex_patched.exe needed)",
         "rt17":               "RT17 (runpkr00 + convbin can convert)",
-        "unknown_with_bzip2": "Unknown receiver model (bzip2 header found — try CTR)",
+        "unknown_with_bzip2": "Unknown receiver model (bzip2 header found -- try CTR)",
         "no_bzip2_header":    "No bzip2 header found (non-standard / corrupted?)",
         "unknown":            "Could not determine format",
     }
