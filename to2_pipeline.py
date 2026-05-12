@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import bz2
 import gc
 import hashlib
 import json
@@ -180,6 +181,95 @@ def _parse_filename_dt(name: str) -> tuple[Optional[str], Optional[int]]:
             pass
 
     return None, None
+
+
+# ── T02 binary bzip2 header probe ────────────────────────────────────────────
+# T02/T04 files embed a bzip2-compressed text block in the first 64 KB that
+# contains session metadata. Parsing this is reliable regardless of filename
+# naming convention and requires no external tools.
+_T02_RE_START    = re.compile(r"(?:SessionStart|StartTime|session_start)\s*[=:]\s*([0-9T:.\-Z+]{10,30})", re.IGNORECASE)
+_T02_RE_END      = re.compile(r"(?:SessionEnd|EndTime|session_end)\s*[=:]\s*([0-9T:.\-Z+]{10,30})", re.IGNORECASE)
+_T02_RE_INTERVAL = re.compile(r"(?:Interval|SampleRate|Rate)\s*[=:]\s*([0-9]+(?:\.[0-9]+)?)", re.IGNORECASE)
+_T02_RE_MARKER   = re.compile(r"(?:MarkerName|SiteName|Station|marker)\s*[=:]\s*([A-Za-z0-9_\-]{2,20})", re.IGNORECASE)
+_T02_RE_DT_ANY   = re.compile(r"((?:19|20)\d{2}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2})?(?:Z|[+-]\d{2}:\d{2})?)")
+
+
+def _probe_t02_header(path: Path) -> dict:
+    """
+    Read first 64 KB of a T02/T04 binary, find bzip2 blobs, decompress and
+    extract session timestamps + sample interval + marker name. Never raises.
+    Works with any filename convention.
+    """
+    result: dict = {"session_start": None, "session_end": None,
+                    "interval_s": None, "marker_name": None}
+    try:
+        blob = path.read_bytes()[:65536]
+    except OSError:
+        return result
+
+    MAGIC = b"BZh"
+    offset = 0
+    while True:
+        pos = blob.find(MAGIC, offset)
+        if pos < 0:
+            break
+        dec = b""
+        try:
+            dec = bz2.decompress(blob[pos:])
+        except Exception:
+            try:
+                d = bz2.BZ2Decompressor()
+                dec = d.decompress(blob[pos:])
+            except Exception:
+                offset = pos + 1
+                continue
+        try:
+            text = dec.decode("ascii", errors="ignore")
+        except Exception:
+            text = ""
+
+        if result["session_start"] is None:
+            m = _T02_RE_START.search(text)
+            if m:
+                result["session_start"] = m.group(1).strip()
+        if result["session_end"] is None:
+            m = _T02_RE_END.search(text)
+            if m:
+                result["session_end"] = m.group(1).strip()
+        if result["interval_s"] is None:
+            m = _T02_RE_INTERVAL.search(text)
+            if m:
+                result["interval_s"] = m.group(1).strip()
+        if result["marker_name"] is None:
+            m = _T02_RE_MARKER.search(text)
+            if m:
+                result["marker_name"] = m.group(1).strip()
+        # Fallback: grab any ISO-ish datetime if structured keys absent
+        if result["session_start"] is None:
+            for m in _T02_RE_DT_ANY.finditer(text):
+                result["session_start"] = m.group(1)
+                break
+
+        if all(v is not None for v in result.values()):
+            break
+        offset = pos + 1
+
+    return result
+
+
+def _iso_from_t02_ts(s: Optional[str]) -> Optional[str]:
+    """Parse a T02 header timestamp string to UTC ISO-format string. Never raises."""
+    if not s:
+        return None
+    try:
+        ts = pd.Timestamp(s)
+        if ts.tzinfo is None:
+            ts = ts.tz_localize("UTC")
+        else:
+            ts = ts.tz_convert("UTC")
+        return ts.isoformat()
+    except Exception:
+        return None
 
 
 def _duration_s(t_first: Optional[str], t_last: Optional[str]) -> Optional[float]:
@@ -991,6 +1081,7 @@ def run_pipeline(cfg: PipelineConfig, progress_cb=None) -> Path:
 
             # Per-file variables — initialised here so INSERT always has values
             # regardless of which code path (empty/cached/converted/failed) is taken.
+            _hdr:                 dict            = {}  # bzip2 probe result
             interval_s:           Optional[float] = None
             total_epochs:         int             = 0
             expected_epochs:      Optional[int]   = None
@@ -1017,6 +1108,22 @@ def run_pipeline(cfg: PipelineConfig, progress_cb=None) -> Path:
                         cache_hits += 1
                         continue
 
+                    # Tier-0: read T02 binary bzip2 header — gives session timestamps
+                    # and marker name without any external tools, regardless of filename
+                    # naming convention.
+                    _hdr = _probe_t02_header(p)
+                    if station == "UNKNOWN" and _hdr.get("marker_name"):
+                        station = re.sub(r"[^A-Z0-9]", "", _hdr["marker_name"].upper())[:8] or "UNKNOWN"
+                    if fn_date is None and _hdr.get("session_start"):
+                        _t0 = _iso_from_t02_ts(_hdr["session_start"])
+                        if _t0:
+                            try:
+                                _dt0 = pd.Timestamp(_t0)
+                                fn_date = _dt0.date().isoformat()
+                                fn_hour = _dt0.hour
+                            except Exception:
+                                pass
+
                     out_dir = rinex_dir / station
                     rinex_obs      = None
                     convert_status = "skipped"
@@ -1042,10 +1149,17 @@ def run_pipeline(cfg: PipelineConfig, progress_cb=None) -> Path:
                     if convert_status == "ok":
                         success_by_station.add(station)
 
-                    t_first = t_last = None
+                    # Seed from bzip2 probe; RINEX conversion overrides below if available
+                    t_first = _iso_from_t02_ts(_hdr.get("session_start"))
+                    t_last  = _iso_from_t02_ts(_hdr.get("session_end"))
                     lat = lon = h_m = None
                     consts = sigs = None
-                    dur_s = None
+                    dur_s = _duration_s(t_first, t_last)
+                    if interval_s is None and _hdr.get("interval_s"):
+                        try:
+                            interval_s = _snap_interval(float(_hdr["interval_s"]))
+                        except Exception:
+                            pass
 
                     if rinex_obs and rinex_obs.exists():
                         hdr_lines = _read_rinex_header_lines(rinex_obs)
@@ -1106,10 +1220,11 @@ def run_pipeline(cfg: PipelineConfig, progress_cb=None) -> Path:
                 rinex_obs      = None
                 convert_status = "failed"
                 convert_detail = f"{type(e).__name__}: {e}"
-                t_first = t_last = None
+                t_first = _iso_from_t02_ts(_hdr.get("session_start"))
+                t_last  = _iso_from_t02_ts(_hdr.get("session_end"))
                 lat = lon = h_m = None
                 consts = sigs   = None
-                dur_s           = None
+                dur_s = _duration_s(t_first, t_last)
                 failed         += 1
 
             processed += 1
