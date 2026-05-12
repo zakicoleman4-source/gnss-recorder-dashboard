@@ -25,8 +25,29 @@ In the **Utilities** section of the sidebar:
 - **Download manifests zip** — bundles `files_manifest.csv`, `summary.json`, `coverage_gaps.csv`, `intra_file_gaps.csv`. Open the same zip on another machine via **Load manifest zip** to get an identical view.
 - **Download SQLite DB** — full scan cache for backup.
 
+## Trimble Alloy / RT27 datasets
+
+If your files are from Trimble Alloy receivers (modern multi-constellation units), tick **CTR-first mode** in the sidebar before clicking Scan now:
+
+> **CTR-first mode (skip runpkr00 — for RT27/Alloy-only datasets)**
+
+This sends all files straight to the bundled `convertToRinex_cli.exe` and skips the older `runpkr00` step. Without it, each file wastes ~0.6 s on a converter that cannot handle RT27 — adds ~10 min to a 10,000-file scan.
+
+Not sure what receiver type you have? Run `PROBE_FILES.bat` first (see below).
+
+## Pre-scan inventory (PROBE_FILES.bat)
+
+Before running a full scan, use `PROBE_FILES.bat` to inspect a data folder quickly:
+
+1. Double-click `PROBE_FILES.bat`.
+2. Type (or drag-drop) your data folder path and press Enter.
+3. It prints a summary: receiver models, station names, date range, sample intervals, converter recommendation.
+4. Full results saved to `probe_results.csv` in the dashboard folder.
+
+Fast (~60 files/s, no conversion needed). Run this first on any new dataset.
+
 ## Notes
 
-- Re-running **Scan now** on the same folder uses the cache — only new or modified files are re-processed.
-- The dashboard never uploads data anywhere. All conversion and analysis runs locally.
-- For the RT27 limitation on Trimble Alloy receivers, see the README.
+- Re-running **Scan now** reuses the cache — only new or changed files are reprocessed.
+- The dashboard never uploads data anywhere. All processing runs locally.
+- Station names, timestamps, and coordinates come from the converted RINEX output — files with no embedded metadata are handled automatically.

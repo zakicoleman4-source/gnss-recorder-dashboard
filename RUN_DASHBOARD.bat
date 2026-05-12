@@ -21,9 +21,10 @@ if not exist "%STREAMLIT_CFG_DIR%\credentials.toml" (
   >> "%STREAMLIT_CFG_DIR%\credentials.toml" echo email = ""
 )
 
-if exist "%HERE%tools\runpkr00\runpkr00.exe" set "GNSS_RUNPKR00=%HERE%tools\runpkr00\runpkr00.exe"
-if exist "%HERE%tools\rtklib\convbin.exe"    set "GNSS_CONVBIN=%HERE%tools\rtklib\convbin.exe"
-if exist "%HERE%tools\rtklib\rnx2rtkp.exe"  set "GNSS_RNX2RTKP=%HERE%tools\rtklib\rnx2rtkp.exe"
+if exist "%HERE%tools\runpkr00\runpkr00.exe"                     set "GNSS_RUNPKR00=%HERE%tools\runpkr00\runpkr00.exe"
+if exist "%HERE%tools\rtklib\convbin.exe"                        set "GNSS_CONVBIN=%HERE%tools\rtklib\convbin.exe"
+if exist "%HERE%tools\rtklib\rnx2rtkp.exe"                      set "GNSS_RNX2RTKP=%HERE%tools\rtklib\rnx2rtkp.exe"
+if exist "%HERE%tools\convert_to_rinex\convertToRinex_cli.exe"  set "GNSS_CTR=%HERE%tools\convert_to_rinex\convertToRinex_cli.exe"
 
 set "PYTHONPATH=%HERE%;%PYTHONPATH%"
 
