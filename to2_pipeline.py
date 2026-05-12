@@ -43,6 +43,7 @@ class PipelineConfig:
     stop_after_success_per_station: bool = False
     probe_max_total_files: int = 200_000
     convert_cmd_template: Optional[str] = None
+    ctr_path: Optional[Path] = None             # convertToRinex_patched.exe for RT27/Alloy
     station_coords_path: Optional[Path] = None  # CSV: station,lat,lon,height_m
     rnx2rtkp_path: Optional[Path] = None        # rnx2rtkp.exe for SPP coord solve
 
@@ -1145,6 +1146,38 @@ def _nonempty_obs(out_dir: Path) -> Optional[Path]:
     return max(candidates, key=lambda x: x.stat().st_mtime)
 
 
+def _convert_t02_ctr(ctr_exe: Path, inp: Path, out_dir: Path) -> Optional[Path]:
+    """
+    Convert T02 → RINEX 3 using IL-patched convertToRinex_patched.exe.
+    Handles RT27/Alloy files that runpkr00+convbin cannot decode.
+    Returns obs Path on success. Raises ConverterError on failure.
+    """
+    out_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        r = subprocess.run(
+            [str(ctr_exe), str(inp), "-p", str(out_dir), "-v", "3.04"],
+            capture_output=True, text=True, timeout=120, check=False,
+            **_SUBPROC_KW,
+        )
+    except subprocess.TimeoutExpired:
+        raise ConverterError("convertToRinex timed out (120s)")
+    except Exception as e:
+        raise ConverterError(f"convertToRinex failed to launch: {e}")
+    combined = (r.stdout or "") + (r.stderr or "")
+    if "aborted" in combined.lower():
+        raise ConverterError(f"convertToRinex aborted: {combined[:200].strip()}")
+    stem = inp.stem
+    matches = [p for p in out_dir.glob(f"{stem}.??o") if p.stat().st_size > 0]
+    if not matches:
+        matches = [p for p in out_dir.glob("*.??o") if p.stat().st_size > 0]
+    if not matches:
+        raise ConverterError(
+            f"convertToRinex produced no obs "
+            f"({combined[:120].strip() or f'exit={r.returncode}'})"
+        )
+    return matches[0]
+
+
 def convert_to_rinex(cfg: PipelineConfig, inp: Path, out_dir: Path) -> Optional[Path]:
     """
     Convert a vendor binary (T02/T04) → RINEX 3 obs. Returns the obs path on success.
@@ -1348,21 +1381,32 @@ def run_pipeline(cfg: PipelineConfig, progress_cb=None) -> Path:
                     rinex_obs      = None
                     convert_status = "skipped"
                     convert_detail = None
+                    has_ctr        = bool(cfg.ctr_path and cfg.ctr_path.exists())
                     has_converter  = bool(
                         cfg.convert_cmd_template
+                        or has_ctr
                         or (cfg.runpkr00_path and cfg.runpkr00_path.exists()
                             and has_convbin_cfg(cfg))
                     )
 
-                    # Early-skip: if the probe identified an Alloy / RT27-era
-                    # receiver, don't waste 1-3 s on runpkr00 + convbin per
-                    # file just to confirm convbin can't decode the records.
                     rx_model = (_hdr.get("receiver_model") or "").lower()
                     is_rt27_receiver = any(
                         m in rx_model for m in _RT27_RECEIVER_MARKERS
                     )
 
-                    if has_converter and is_rt27_receiver:
+                    if is_rt27_receiver and has_ctr:
+                        # RT27/Alloy file + patched converter available
+                        try:
+                            rinex_obs = _convert_t02_ctr(cfg.ctr_path, p, out_dir)
+                            convert_status = "ok" if rinex_obs else "failed"
+                            if not rinex_obs:
+                                convert_detail = "convertToRinex produced no output file"
+                        except ConverterError as ce:
+                            rinex_obs      = None
+                            convert_status = "failed"
+                            convert_detail = str(ce)
+                    elif has_converter and is_rt27_receiver:
+                        # Early-skip: RT27 with no CTR — runpkr00+convbin can't decode
                         convert_status = "unsupported_rt27"
                         convert_detail = (
                             f"unsupported_rt27: {rx_model!r} records in RT27 / CMRx "
@@ -1375,18 +1419,35 @@ def run_pipeline(cfg: PipelineConfig, progress_cb=None) -> Path:
                         except ConverterError as ce:
                             rinex_obs      = None
                             msg            = str(ce)
-                            # Distinguish "we can't decode this format" from a
-                            # genuine converter failure so the dashboard can
-                            # filter / report the two cases separately.
-                            if msg.startswith("unsupported_rt27"):
+                            if msg.startswith("unsupported_rt27") and has_ctr:
+                                # RT27 detected mid-stream — fall through to CTR
+                                try:
+                                    rinex_obs = _convert_t02_ctr(cfg.ctr_path, p, out_dir)
+                                    convert_status = "ok" if rinex_obs else "failed"
+                                    convert_detail = None if rinex_obs else "convertToRinex produced no output file"
+                                except ConverterError as ce2:
+                                    convert_status = "failed"
+                                    convert_detail = str(ce2)
+                            elif msg.startswith("unsupported_rt27"):
                                 convert_status = "unsupported_rt27"
+                                convert_detail = msg
                             else:
                                 convert_status = "failed"
-                            convert_detail = msg
+                                convert_detail = msg
                         else:
-                            convert_status = "ok" if rinex_obs else "failed"
-                            if not rinex_obs:
-                                convert_detail = "converter ran but produced no output file"
+                            if rinex_obs is None and has_ctr:
+                                # runpkr00+convbin produced nothing — may be untagged RT27
+                                try:
+                                    rinex_obs = _convert_t02_ctr(cfg.ctr_path, p, out_dir)
+                                    convert_status = "ok" if rinex_obs else "failed"
+                                    convert_detail = None if rinex_obs else "convertToRinex produced no output file"
+                                except ConverterError as ce:
+                                    convert_status = "failed"
+                                    convert_detail = str(ce)
+                            else:
+                                convert_status = "ok" if rinex_obs else "failed"
+                                if not rinex_obs:
+                                    convert_detail = "converter ran but produced no output file"
 
                     attempted_by_station[station] = attempted_by_station.get(station, 0) + 1
                     # Treat unsupported_rt27 as "done" for stop_after_success_per_station —

@@ -665,6 +665,7 @@ with st.sidebar:
         runpkr_default = str(_tools / "runpkr00" / "runpkr00.exe")
         convbin_default = str(_tools / "rtklib" / "convbin.exe")
         rnx2rtkp_default = str(_tools / "rtklib" / "rnx2rtkp.exe")
+        ctr_default = str(_tools / "convert_to_rinex" / "convertToRinex_patched.exe")
 
         # Auto-detect converter availability before the expander so the checkbox
         # below can default correctly without requiring the user to open it.
@@ -672,6 +673,8 @@ with st.sidebar:
         _convbin_env = os.environ.get("GNSS_CONVBIN", convbin_default)
         _rnx2rtkp_env = os.environ.get("GNSS_RNX2RTKP", rnx2rtkp_default)
         can_convert_default = Path(_runpkr_env).exists() and Path(_convbin_env).exists()
+        _ctr_env = os.environ.get("GNSS_CTR", ctr_default)
+        can_ctr_default = Path(_ctr_env).exists()
 
         with st.expander("Converter & coordinate tool paths", expanded=not can_convert_default):
             runpkr_path = Path(_clean_path_input(st.text_input(
@@ -815,11 +818,13 @@ with st.sidebar:
                 pct = int((i / max(1, total)) * 100)
                 prog.progress(min(100, pct), text=f"Scanning {i}/{total}: {Path(path).name}")
 
+            _ctr_p = Path(_ctr_env)
             cfg = PipelineConfig(
                 data_root=data_root.resolve(),
                 cache_dir=cache_dir.resolve(),
                 runpkr00_path=runpkr_path.resolve() if use_convert and runpkr_path.exists() else None,
                 convbin_path=convbin_path.resolve() if use_convert and convbin_path.exists() else None,
+                ctr_path=_ctr_p.resolve() if can_ctr_default and _ctr_p.exists() else None,
                 rnx2rtkp_path=rnx2rtkp_path.resolve() if rnx2rtkp_path.exists() else None,
                 station_coords_path=station_coords_path.resolve() if station_coords_path and station_coords_path.exists() else None,
                 max_files_per_station=1 if quick_probe else None,
