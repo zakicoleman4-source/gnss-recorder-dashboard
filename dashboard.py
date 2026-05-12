@@ -1008,16 +1008,30 @@ def _build_event_ts(df_in: pd.DataFrame) -> pd.Series:
     """
     Vectorized fast path with per-row fallback for tricky filenames.
 
-    1) Try a vectorized YYYYMMDDHHMMSS / HHMM / HH match across the joined
-       (discovered_from + file_name) string. This handles the vast majority
-       of GNSS station filenames in a few ms even for 100k rows.
-    2) For rows that didn't match, fall back to the row-wise _infer_ts_from_row
-       (RINEX2/3 naming etc.).
+    Priority order:
+    1) inferred_date + filename_hour from manifest (pipeline DOY parser — most reliable)
+    2) Vectorized YYYYMMDDHHMMSS / HHMM / HH match across joined path+filename
+    3) Per-row _infer_ts_from_row (RINEX2/3 naming, DOY in path, etc.)
+    4) modified_utc fallback
     """
+    out = pd.Series(pd.NaT, index=df_in.index, dtype="datetime64[ns, UTC]")
+
+    # Priority 1: use inferred_date + filename_hour — pipeline already parsed DOY correctly.
+    # Trimble T02 DOY filenames (e.g. INVK20261190100.T02) fail the YYYYMMDD regex below
+    # but the pipeline stores the correct parsed date here.
+    if "inferred_date" in df_in.columns:
+        dates = pd.to_datetime(df_in["inferred_date"], errors="coerce", utc=True)
+        if "filename_hour" in df_in.columns:
+            hours = pd.to_numeric(df_in["filename_hour"], errors="coerce").fillna(0).astype("Int64")
+            mask = dates.notna()
+            out.loc[mask] = dates.loc[mask] + pd.to_timedelta(hours.loc[mask].astype(float), unit="h")
+        else:
+            mask = dates.notna()
+            out.loc[mask] = dates.loc[mask]
+
     fn = df_in.get("file_name", pd.Series([""] * len(df_in))).astype(str)
     df_path = df_in.get("discovered_from", pd.Series([""] * len(df_in))).astype(str)
     joined = df_path.str.cat(fn, sep=" ")
-    out = pd.Series(pd.NaT, index=df_in.index, dtype="datetime64[ns, UTC]")
 
     # YYYYMMDDHHMMSS first, then YYYYMMDDHHMM, then YYYYMMDDHH.
     patterns = [
