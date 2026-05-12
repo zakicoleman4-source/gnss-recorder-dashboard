@@ -28,6 +28,8 @@ TO_EXTS = {".to2", ".t02", ".to4", ".t04", ".t00", ".t01"}
 # Match station prefix before an embedded year (19xx/20xx) or a 3-digit DOY+hour-letter.
 # Handles alpha stations (AHTI), numeric VRS stations (2406), and RINEX2-style names (INVK119a).
 STATION_RE = re.compile(r"^([A-Za-z0-9]{3,9})(?=(?:19|20)\d{2}|\d{3}[a-xA-X])", re.IGNORECASE)
+# Fallback: client files may have reliable 3-4 char prefix but unreliable date suffix
+_STATION_PREFIX_RE = re.compile(r"^([A-Za-z][A-Za-z0-9]{2,3})", re.IGNORECASE)
 
 _THIS_DIR = Path(__file__).resolve().parent
 
@@ -44,6 +46,7 @@ class PipelineConfig:
     probe_max_total_files: int = 200_000
     convert_cmd_template: Optional[str] = None
     ctr_path: Optional[Path] = None             # convertToRinex_patched.exe for RT27/Alloy
+    ctr_first: bool = False                     # skip runpkr00+convbin, go straight to CTR
     station_coords_path: Optional[Path] = None  # CSV: station,lat,lon,height_m
     rnx2rtkp_path: Optional[Path] = None        # rnx2rtkp.exe for SPP coord solve
 
@@ -132,9 +135,11 @@ def _pick_probe_files(
 
 def _station_from_filename(name: str) -> str:
     m = STATION_RE.match(name)
-    if not m:
-        return "UNKNOWN"
-    return m.group(1).upper()
+    if m:
+        return m.group(1).upper()
+    # Fallback: first 3-4 chars when date suffix doesn't match expected pattern
+    m = _STATION_PREFIX_RE.match(name)
+    return m.group(1).upper() if m else "UNKNOWN"
 
 
 # ── Filename timestamp parsing ────────────────────────────────────────────────
@@ -1065,7 +1070,11 @@ def _convbin_on_dat(convbin_path: Path, dat: Path, obs_path: Path) -> None:
         raise ConverterError("convbin -r rt17 timed out (180s)")
     except Exception as e:
         raise ConverterError(f"convbin failed to launch: {e}")
-    if not (obs_path.exists() and obs_path.stat().st_size > 0):
+    try:
+        ok = obs_path.stat().st_size > 0
+    except OSError:
+        ok = False
+    if not ok:
         raise ConverterError(f"convbin produced no non-empty obs ({_short_err(p)})")
 
 
@@ -1140,10 +1149,19 @@ def _rnx2rtkp_spp(
 
 def _nonempty_obs(out_dir: Path) -> Optional[Path]:
     candidates = list(out_dir.glob("*.obs")) + list(out_dir.glob("*.??o"))
-    candidates = [c for c in candidates if c.exists() and c.stat().st_size > 0]
-    if not candidates:
+    live = []
+    for c in candidates:
+        try:
+            if c.stat().st_size > 0:
+                live.append(c)
+        except OSError:
+            pass
+    if not live:
         return None
-    return max(candidates, key=lambda x: x.stat().st_mtime)
+    try:
+        return max(live, key=lambda x: x.stat().st_mtime)
+    except OSError:
+        return live[0]
 
 
 def _convert_t02_ctr(ctr_exe: Path, inp: Path, out_dir: Path) -> Optional[Path]:
@@ -1166,10 +1184,16 @@ def _convert_t02_ctr(ctr_exe: Path, inp: Path, out_dir: Path) -> Optional[Path]:
     combined = (r.stdout or "") + (r.stderr or "")
     if "aborted" in combined.lower():
         raise ConverterError(f"convertToRinex aborted: {combined[:200].strip()}")
-    stem = inp.stem
-    matches = [p for p in out_dir.glob(f"{stem}.??o") if p.stat().st_size > 0]
+    import glob as _glob
+    stem_pat = _glob.escape(inp.stem)
+    def _safe_size(p: Path) -> bool:
+        try:
+            return p.stat().st_size > 0
+        except OSError:
+            return False
+    matches = [p for p in out_dir.glob(f"{stem_pat}.??o") if _safe_size(p)]
     if not matches:
-        matches = [p for p in out_dir.glob("*.??o") if p.stat().st_size > 0]
+        matches = [p for p in out_dir.glob("*.??o") if _safe_size(p)]
     if not matches:
         raise ConverterError(
             f"convertToRinex produced no obs "
@@ -1394,8 +1418,9 @@ def run_pipeline(cfg: PipelineConfig, progress_cb=None) -> Path:
                         m in rx_model for m in _RT27_RECEIVER_MARKERS
                     )
 
-                    if is_rt27_receiver and has_ctr:
+                    if (is_rt27_receiver or cfg.ctr_first) and has_ctr:
                         # RT27/Alloy file + patched converter available
+                        # ctr_first=True also routes here: skips runpkr00+convbin entirely
                         try:
                             rinex_obs = _convert_t02_ctr(cfg.ctr_path, p, out_dir)
                             convert_status = "ok" if rinex_obs else "failed"

@@ -700,6 +700,18 @@ with st.sidebar:
         if use_convert and not can_convert:
             st.warning("runpkr00.exe or convbin.exe not found at the paths above. Conversion disabled.")
 
+        ctr_first = st.checkbox(
+            "CTR-first mode (skip runpkr00 — for RT27/Alloy-only datasets)",
+            value=can_ctr_default and not can_convert,
+            help=(
+                "ON = go straight to convertToRinex_patched.exe without trying runpkr00+convbin first. "
+                "Use when all files are Trimble Alloy / RT27 (no receiver model in header). "
+                "Saves ~1 min per 1,000 files vs the default fallback path."
+            ),
+        )
+        if ctr_first and not can_ctr_default:
+            st.warning("CTR-first requires convertToRinex_patched.exe — not found at path above.")
+
         quick_probe = st.checkbox(
             "Quick probe (1 file per station) — fastest for coords/signals",
             value=False,
@@ -825,6 +837,7 @@ with st.sidebar:
                 runpkr00_path=runpkr_path.resolve() if use_convert and runpkr_path.exists() else None,
                 convbin_path=convbin_path.resolve() if use_convert and convbin_path.exists() else None,
                 ctr_path=_ctr_p.resolve() if can_ctr_default and _ctr_p.exists() else None,
+                ctr_first=bool(ctr_first and can_ctr_default),
                 rnx2rtkp_path=rnx2rtkp_path.resolve() if rnx2rtkp_path.exists() else None,
                 station_coords_path=station_coords_path.resolve() if station_coords_path and station_coords_path.exists() else None,
                 max_files_per_station=1 if quick_probe else None,
