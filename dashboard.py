@@ -665,7 +665,7 @@ with st.sidebar:
         runpkr_default = str(_tools / "runpkr00" / "runpkr00.exe")
         convbin_default = str(_tools / "rtklib" / "convbin.exe")
         rnx2rtkp_default = str(_tools / "rtklib" / "rnx2rtkp.exe")
-        ctr_default = str(_tools / "convert_to_rinex" / "convertToRinex_patched.exe")
+        ctr_default = str(_tools / "convert_to_rinex" / "convertToRinex_cli.exe")
 
         # Auto-detect converter availability before the expander so the checkbox
         # below can default correctly without requiring the user to open it.
@@ -704,13 +704,13 @@ with st.sidebar:
             "CTR-first mode (skip runpkr00 — for RT27/Alloy-only datasets)",
             value=can_ctr_default and not can_convert,
             help=(
-                "ON = go straight to convertToRinex_patched.exe without trying runpkr00+convbin first. "
+                "ON = go straight to convertToRinex_cli.exe without trying runpkr00+convbin first. "
                 "Use when all files are Trimble Alloy / RT27 (no receiver model in header). "
                 "Saves ~1 min per 1,000 files vs the default fallback path."
             ),
         )
         if ctr_first and not can_ctr_default:
-            st.warning("CTR-first requires convertToRinex_patched.exe — not found at path above.")
+            st.warning("CTR-first requires convertToRinex_cli.exe — not found at path above.")
 
         quick_probe = st.checkbox(
             "Quick probe (1 file per station) — fastest for coords/signals",

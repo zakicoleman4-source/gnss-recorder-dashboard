@@ -26,17 +26,20 @@ The pipeline reads each `.T02` / `.T04` file's bzip2-embedded metadata block to 
 
 It then attempts to convert the binary to RINEX 3 using bundled `runpkr00.exe` (Trimble unpacker) → `convbin.exe` (RTKLIB). When the conversion succeeds, the dashboard also shows per-file completeness, epoch counts, intra-file gaps, and the constellation / signal list.
 
-## Modern Trimble Alloy receivers (RT27 limitation)
+## Modern Trimble Alloy receivers (RT27)
 
-Modern Trimble Alloy receivers record measurement data in the **RT27** format (extended RT17 with multi-constellation records). RTKLIB `convbin` only decodes the older RT17 format; the open-source tool chain cannot extract observations from RT27. Files that hit this case are marked `convert_status = unsupported_rt27` in the manifest, and only the bzip2 header metadata is used. Coverage analysis, station maps, and date/hour gap detection still work — only per-file epoch analytics are missing.
+Modern Trimble Alloy receivers record measurement data in the **RT27** format (extended RT17 with multi-constellation records). RTKLIB `convbin` only decodes the older RT17 format and cannot process RT27.
 
-Trimble's proprietary `convertToRINEX` GUI is the only tool that handles RT27, and Trimble has no working command-line mode (verified on 2.1.1.0 and 3.14.0). If full RINEX conversion is required, run that tool by hand on the affected files.
+When `tools\convert_to_rinex\convertToRinex_cli.exe` is present, the pipeline routes RT27 files through it automatically and produces full RINEX 3.04 output (GPS, GLONASS, Galileo, BeiDou, QZSS). RT17 files continue to use `runpkr00` + `convbin` as before.
+
+The **CTR-first mode** checkbox (sidebar) skips the `runpkr00` attempt entirely — use this when your dataset is known to be all-Alloy (saves ~1 min per 1,000 files).
 
 ## Bundled tools (`tools/`)
 
-- `tools\runpkr00\runpkr00.exe` — Trimble proprietary T02 / T04 → DAT unpacker
-- `tools\rtklib\convbin.exe` — RTKLIB DAT (RT17) → RINEX 3 converter
-- `tools\rtklib\rnx2rtkp.exe` — RTKLIB single-point position solver (used as a coord fallback when the T02 header has no `RefStationLLH`)
+- `tools\runpkr00\runpkr00.exe` — Trimble T02 / T04 -> DAT unpacker (RT17)
+- `tools\rtklib\convbin.exe` — RTKLIB DAT -> RINEX 3 converter (RT17)
+- `tools\rtklib\rnx2rtkp.exe` — RTKLIB single-point position solver (coord fallback when T02 header has no `RefStationLLH`)
+- `tools\convert_to_rinex\convertToRinex_cli.exe` — Trimble RT27 / Alloy -> RINEX 3.04 converter (CLI build)
 
 ## Repository layout
 

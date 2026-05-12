@@ -46,7 +46,7 @@ class PipelineConfig:
     stop_after_success_per_station: bool = False
     probe_max_total_files: int = 200_000
     convert_cmd_template: Optional[str] = None
-    ctr_path: Optional[Path] = None             # convertToRinex_patched.exe for RT27/Alloy
+    ctr_path: Optional[Path] = None             # convertToRinex_cli.exe for RT27/Alloy
     ctr_first: bool = False                     # skip runpkr00+convbin, go straight to CTR
     station_coords_path: Optional[Path] = None  # CSV: station,lat,lon,height_m
     rnx2rtkp_path: Optional[Path] = None        # rnx2rtkp.exe for SPP coord solve
@@ -1171,7 +1171,7 @@ def _nonempty_obs(out_dir: Path) -> Optional[Path]:
 
 def _convert_t02_ctr(ctr_exe: Path, inp: Path, out_dir: Path) -> Optional[Path]:
     """
-    Convert T02 → RINEX 3 using IL-patched convertToRinex_patched.exe.
+    Convert T02 → RINEX 3 using IL-patched convertToRinex_cli.exe.
     Handles RT27/Alloy files that runpkr00+convbin cannot decode.
     Returns obs Path on success. Raises ConverterError on failure.
     """

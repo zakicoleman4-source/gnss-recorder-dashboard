@@ -353,7 +353,7 @@ def main() -> None:
 
     print("\nFormat detection (from receiver model in header):")
     label_map = {
-        "rt27":               "RT27/Alloy (convertToRinex_patched.exe needed)",
+        "rt27":               "RT27/Alloy (convertToRinex_cli.exe needed)",
         "rt17":               "RT17 (runpkr00 + convbin can convert)",
         "unknown_with_bzip2": "Unknown receiver model (bzip2 header found -- try CTR)",
         "no_bzip2_header":    "No bzip2 header found (non-standard / corrupted?)",
@@ -441,10 +441,10 @@ def main() -> None:
     rt27 = fmt_counts.get("rt27", 0) + fmt_counts.get("unknown_with_bzip2", 0)
     rt17 = fmt_counts.get("rt17", 0)
     if rt27 > 0 and rt17 > 0:
-        print(f"  Mixed dataset: {rt27:,} RT27/Alloy files need convertToRinex_patched.exe,")
+        print(f"  Mixed dataset: {rt27:,} RT27/Alloy files need convertToRinex_cli.exe,")
         print(f"  {rt17:,} RT17 files need runpkr00 + convbin.")
     elif rt27 > 0:
-        print(f"  All {rt27:,} files appear to be RT27/Alloy -> need convertToRinex_patched.exe.")
+        print(f"  All {rt27:,} files appear to be RT27/Alloy -> need convertToRinex_cli.exe.")
         print("  runpkr00 + convbin will NOT work on these.")
     elif rt17 > 0:
         print(f"  All {rt17:,} files appear to be RT17 -> runpkr00 + convbin should work.")
