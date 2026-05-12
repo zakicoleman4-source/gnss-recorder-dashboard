@@ -81,6 +81,16 @@ def _ecef_to_llh(x: float, y: float, z: float):
     return math.degrees(lat), math.degrees(lon), h
 
 
+# Same pattern as to2_pipeline.py STATION_RE — kept in sync deliberately
+_STATION_RE = re.compile(
+    r"^([A-Za-z0-9]{3,9})(?=(?:19|20)\d{2}|\d{3}[a-xA-X])", re.IGNORECASE
+)
+
+def _station_from_filename(name: str) -> Optional[str]:
+    m = _STATION_RE.match(name)
+    return m.group(1).upper() if m else None
+
+
 # ---------------------------------------------------------------------------
 # Filename date extraction (GeoNet: SSSS_YYYYDDDHHMM_*  or  SSSSYYYYMMDDHHMMSS_*)
 # ---------------------------------------------------------------------------
@@ -113,6 +123,7 @@ def probe_file(path: Path) -> dict:
     result = {
         "path": str(path),
         "filename": path.name,
+        "station_from_fn": _station_from_filename(path.name),
         "size_kb": 0,
         "session_start": None,
         "session_end": None,
@@ -353,17 +364,35 @@ def main() -> None:
     if len(rx_counts) > 20:
         print(f"  ... and {len(rx_counts)-20} more (see CSV)")
 
-    # Station breakdown
+    # Station breakdown — header-based
     stn_counts: dict = {}
     for r in results:
-        k = r["marker_name"] or "(not found)"
+        k = r["marker_name"] or "(not found in header)"
         stn_counts[k] = stn_counts.get(k, 0) + 1
 
-    print(f"\nStations ({len(stn_counts)} unique):")
+    print(f"\nStations from header ({len(stn_counts)} unique):")
     for stn, count in sorted(stn_counts.items(), key=lambda x: -x[1])[:20]:
         print(f"  {stn:<20} {count:>6,}")
     if len(stn_counts) > 20:
         print(f"  ... and {len(stn_counts)-20} more (see CSV)")
+
+    # Station breakdown — filename-based (what pipeline will use)
+    fn_stn_counts: dict = {}
+    for r in results:
+        k = r["station_from_fn"] or "(UNKNOWN -- filename pattern not recognised)"
+        fn_stn_counts[k] = fn_stn_counts.get(k, 0) + 1
+
+    unknown_fn = fn_stn_counts.get("(UNKNOWN -- filename pattern not recognised)", 0)
+    print(f"\nStations from FILENAME ({len(fn_stn_counts)} unique) [pipeline will use these]:")
+    for stn, count in sorted(fn_stn_counts.items(), key=lambda x: -x[1])[:20]:
+        print(f"  {stn:<40} {count:>6,}")
+    if len(fn_stn_counts) > 20:
+        print(f"  ... and {len(fn_stn_counts)-20} more (see CSV)")
+    if unknown_fn > 0:
+        print(f"  WARNING: {unknown_fn:,} files could not extract station from filename.")
+        print("  These will all group as UNKNOWN in dashboard. Send a sample filename.")
+    else:
+        print(f"  OK: all files have recognisable filename station prefix.")
 
     # Interval breakdown
     iv_counts: dict = {}
@@ -382,7 +411,7 @@ def main() -> None:
         print(f"\nDate range (session_start): {min(starts)[:10]}  ->  {max(starts)[:10]}")
 
     # Metadata completeness
-    fields = ["session_start", "marker_name", "lat", "receiver_model", "interval_s"]
+    fields = ["session_start", "station_from_fn", "marker_name", "lat", "receiver_model", "interval_s"]
     print("\nMetadata completeness (% of files with field populated):")
     for f in fields:
         found = sum(1 for r in results if r[f] is not None)
