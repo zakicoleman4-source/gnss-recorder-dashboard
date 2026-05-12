@@ -24,7 +24,7 @@ import pandas as pd
 _PIPELINE_LOCK = threading.Lock()
 
 
-TO_EXTS = {".to2", ".t02", ".to4", ".t04"}
+TO_EXTS = {".to2", ".t02", ".to4", ".t04", ".t00", ".t01"}
 # Match station prefix before an embedded year (19xx/20xx) or a 3-digit DOY+hour-letter.
 # Handles alpha stations (AHTI), numeric VRS stations (2406), and RINEX2-style names (INVK119a).
 STATION_RE = re.compile(r"^([A-Za-z0-9]{3,9})(?=(?:19|20)\d{2}|\d{3}[a-xA-X])", re.IGNORECASE)
@@ -218,99 +218,229 @@ def _parse_filename_dt(name: str, path: Optional[Path] = None) -> tuple[Optional
     return None, None
 
 
-# ── T02 binary bzip2 header probe ────────────────────────────────────────────
-# T02/T04 files embed a bzip2-compressed text block in the first 64 KB that
-# contains session metadata. Parsing this is reliable regardless of filename
-# naming convention and requires no external tools.
-_T02_RE_START    = re.compile(r"(?:SessionStart|StartTime|session_start)\s*[=:]\s*([0-9T:.\-Z+]{10,30})", re.IGNORECASE)
-_T02_RE_END      = re.compile(r"(?:SessionEnd|EndTime|session_end)\s*[=:]\s*([0-9T:.\-Z+]{10,30})", re.IGNORECASE)
+# ── T02 binary header probe ──────────────────────────────────────────────────
+# T02/T04 files are TBC archive containers wrapping bzip2-compressed metadata
+# blocks + binary measurement records. Metadata block normally near the start
+# (~byte 21) but can shift between receiver firmware versions, so scan the
+# whole file (capped). Also scans raw bytes outside bzip2 streams to catch
+# formats that embed plain-text headers.
+
+# Hard upper bound on bytes scanned per file. Most T02s are 200-400 KB; 8 MB
+# covers 24-h files and pathological cases without blowing memory.
+_T02_PROBE_MAX_BYTES = 8 * 1024 * 1024
+
+# Field-value terminator: stop on any control byte (0x00-0x1F — which Trimble
+# uses as length/separator bytes between adjacent fields), comma, semicolon,
+# or the start of the next CamelCase key. Used in every key regex so adjacent
+# fields don't run together.
+_FIELD_END = r"(?=[\x00-\x1f]|,|;|[A-Z][a-z]+[A-Z]|$)"
+
+_T02_RE_START    = re.compile(r"(?:SessionStart(?:Utc)?|StartTime|FirstObs|session_start)\s*[=:]\s*([0-9T:.\-Z+ ]{10,30}?)" + _FIELD_END, re.IGNORECASE)
+_T02_RE_END      = re.compile(r"(?:SessionEnd(?:Utc)?|EndTime|LastObs|session_end)\s*[=:]\s*([0-9T:.\-Z+ ]{10,30}?)" + _FIELD_END, re.IGNORECASE)
 # SessionMeasIntervalMsecs (GeoNet T02 format) stores interval in milliseconds.
 # Plain Interval/SampleRate/Rate stores it in seconds.
-_T02_RE_INTERVAL_MS = re.compile(r"SessionMeasIntervalMsecs\s*[=:]\s*([0-9]+)", re.IGNORECASE)
-_T02_RE_INTERVAL = re.compile(r"(?:Interval|SampleRate|Rate)\s*[=:]\s*([0-9]+(?:\.[0-9]+)?)", re.IGNORECASE)
-# GeoNet T02 uses RefStationName / RefStationCode; older formats use MarkerName / SiteName / Station.
-_T02_RE_MARKER   = re.compile(r"(?:RefStationName|RefStationCode|MarkerName|SiteName|Station|marker)\s*[=:]\s*([A-Za-z0-9_\-]{2,20})", re.IGNORECASE)
-_T02_RE_DT_ANY   = re.compile(r"((?:19|20)\d{2}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2})?(?:Z|[+-]\d{2}:\d{2})?)")
-# GeoNet Trimble Alloy VRS: RefStationLLH:lat,lon,height  (decimal degrees, metres)
-_T02_RE_LLH      = re.compile(r"RefStationLLH\s*[=:]\s*(-?\d+\.\d+)\s*,\s*(-?\d+\.\d+)\s*,\s*(-?\d+\.\d+)", re.IGNORECASE)
+_T02_RE_INTERVAL_MS = re.compile(r"(?:SessionMeasIntervalMsecs|MeasIntervalMsecs|IntervalMsecs)\s*[=:]\s*([0-9]+)", re.IGNORECASE)
+_T02_RE_INTERVAL = re.compile(r"(?:MeasInterval|SampleInterval|SampleRate|Interval|Rate)\s*[=:]\s*([0-9]+(?:\.[0-9]+)?)", re.IGNORECASE)
+# Marker/station name. Char class excludes uppercase to avoid running into
+# next CamelCase field; values like "2406", "HIKB", "site_001" still match.
+_T02_RE_MARKER   = re.compile(r"(?:RefStationName|RefStationCode|MarkerName|SiteName|StationName|StationId|station_id|marker)\s*[=:]\s*([A-Za-z0-9][A-Za-z0-9_\-]{1,18}?)" + _FIELD_END, re.IGNORECASE)
+_T02_RE_DT_ANY   = re.compile(r"((?:19|20)\d{2}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})?)")
+# Compact datetime: YYYYMMDDHHMMSS (some Trimble firmware writes this form)
+_T02_RE_DT_COMPACT = re.compile(r"(?<![0-9])((?:19|20)\d{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])(?:[01]\d|2[0-3])[0-5]\d[0-5]\d)(?![0-9])")
+# Trimble Alloy VRS: RefStationLLH:lat,lon,height  (decimal degrees, metres)
+_T02_RE_LLH      = re.compile(r"(?:RefStationLLH|StationLLH|MarkerLLH)\s*[=:]\s*(-?\d+\.\d+)\s*,\s*(-?\d+\.\d+)\s*,\s*(-?\d+\.\d+)", re.IGNORECASE)
+# Trimble Alloy filePath:/Internal/YYYYMM/DD/<hour-letter>/...
+# Universal in GeoNet T02s and survives even when filename is garbled.
+_T02_RE_FILEPATH = re.compile(r"filePath\s*[=:]\s*/[^/]*?/(\d{4})(\d{2})/(\d{2})/([a-x])/", re.IGNORECASE)
+# Bare ECEF XYZ block (some Trimble firmware records position pre-RINEX)
+_T02_RE_ECEF     = re.compile(r"(?:RefStationXYZ|StationXYZ|ApproxXYZ)\s*[=:]\s*(-?\d+\.\d+)\s*,\s*(-?\d+\.\d+)\s*,\s*(-?\d+\.\d+)", re.IGNORECASE)
+# Receiver model — used to identify Alloy/RT27 receivers up-front so we can
+# skip the (slow, futile) runpkr00→convbin attempt for them.
+# Sample observed field: `ReceiverId:162,Trimble Alloy,6016R40025`
+_T02_RE_RX_MODEL = re.compile(r"ReceiverId\s*[:=]\s*\d+\s*,\s*([^,\x00\r\n]{2,40})", re.IGNORECASE)
+
+# Receivers known to record in RT27 / CMRx (records 75/99/114/etc.) — no open
+# source decoder for these. Match is substring + case-insensitive.
+_RT27_RECEIVER_MARKERS = ("alloy", "netr9 ti-m", "r12i", "r12 receiver")
+
+
+def _validate_marker(s: Optional[str]) -> Optional[str]:
+    """Reject obvious field-bleed captures (e.g. '2406RefStationCode')."""
+    if not s:
+        return None
+    s = s.strip()
+    # Reject if it looks like it includes an adjacent CamelCase field name
+    if re.search(r"(?:Ref|Marker|Station|Site|Antenna|Receiver|Session)[A-Z]", s):
+        return None
+    # Reject if it ends with a known field-key suffix
+    if re.search(r"(?:Name|Code|Id|Type|Number)$", s) and len(s) > 4:
+        return None
+    if len(s) < 2 or len(s) > 20:
+        return None
+    return s
+
+
+def _absorb_text(text: str, result: dict) -> None:
+    """Run all probe regexes against `text` and fill missing fields in `result`."""
+    if not text:
+        return
+    if result["session_start"] is None:
+        m = _T02_RE_START.search(text)
+        if m:
+            result["session_start"] = m.group(1).strip()
+    if result["session_end"] is None:
+        m = _T02_RE_END.search(text)
+        if m:
+            result["session_end"] = m.group(1).strip()
+    if result["interval_s"] is None:
+        m = _T02_RE_INTERVAL_MS.search(text)
+        if m:
+            try:
+                v = int(m.group(1)) / 1000.0
+                if 0.0 < v <= 3600.0:
+                    result["interval_s"] = str(v)
+            except (ValueError, ZeroDivisionError):
+                pass
+    if result["interval_s"] is None:
+        m = _T02_RE_INTERVAL.search(text)
+        if m:
+            try:
+                v = float(m.group(1))
+                if 0.0 < v <= 3600.0:
+                    result["interval_s"] = m.group(1).strip()
+            except ValueError:
+                pass
+    if result["marker_name"] is None:
+        m = _T02_RE_MARKER.search(text)
+        if m:
+            vm = _validate_marker(m.group(1))
+            if vm:
+                result["marker_name"] = vm
+    if result["lat"] is None:
+        m = _T02_RE_LLH.search(text)
+        if m:
+            try:
+                lat, lon, h = float(m.group(1)), float(m.group(2)), float(m.group(3))
+                if -90.0 <= lat <= 90.0 and -180.0 <= lon <= 180.0:
+                    result["lat"], result["lon"], result["height_m"] = lat, lon, h
+            except ValueError:
+                pass
+    if result["receiver_model"] is None:
+        m = _T02_RE_RX_MODEL.search(text)
+        if m:
+            v = m.group(1).strip()
+            # Reject obvious bleed into next field
+            if v and not re.search(r"[A-Z][a-z]+[A-Z][a-z]", v):
+                result["receiver_model"] = v
+    # filePath gives definitive date+hour even when filename is unparseable
+    if result["filepath_date"] is None:
+        m = _T02_RE_FILEPATH.search(text)
+        if m:
+            try:
+                y, mo, d = int(m.group(1)), int(m.group(2)), int(m.group(3))
+                hour = ord(m.group(4).lower()) - ord('a')
+                if 1 <= mo <= 12 and 1 <= d <= 31 and 0 <= hour <= 23:
+                    import datetime as _dt
+                    result["filepath_date"] = _dt.date(y, mo, d).isoformat()
+                    result["filepath_hour"] = hour
+            except (ValueError, OverflowError):
+                pass
+    # Fallback: any ISO-ish datetime
+    if result["session_start"] is None:
+        m = _T02_RE_DT_ANY.search(text)
+        if m:
+            result["session_start"] = m.group(1)
+    # Fallback: compact YYYYMMDDHHMMSS
+    if result["session_start"] is None:
+        m = _T02_RE_DT_COMPACT.search(text)
+        if m:
+            s = m.group(1)
+            result["session_start"] = (
+                f"{s[0:4]}-{s[4:6]}-{s[6:8]}T{s[8:10]}:{s[10:12]}:{s[12:14]}"
+            )
 
 
 def _probe_t02_header(path: Path) -> dict:
     """
-    Read first 64 KB of a T02/T04 binary, find bzip2 blobs, decompress and
-    extract session timestamps + sample interval + marker name. Never raises.
-    Works with any filename convention.
+    Scan a T02/T04 binary for embedded metadata. Multi-strategy:
+      1. Read up to _T02_PROBE_MAX_BYTES of the file
+      2. Find every BZh bzip2 stream, decompress each, regex-scan its text
+      3. Also regex-scan the raw bytes for plain-text headers (some legacy
+         Trimble formats embed unencoded ASCII metadata)
+      4. Accumulate hits across all blocks; never break early
+
+    Never raises. Works regardless of filename naming convention.
     """
-    result: dict = {"session_start": None, "session_end": None,
-                    "interval_s": None, "marker_name": None,
-                    "lat": None, "lon": None, "height_m": None}
+    result: dict = {
+        "session_start": None, "session_end": None,
+        "interval_s": None,     "marker_name": None,
+        "lat": None, "lon": None, "height_m": None,
+        "filepath_date": None,  "filepath_hour": None,
+        "receiver_model": None,
+    }
     try:
-        blob = path.read_bytes()[:65536]
+        size = path.stat().st_size
+    except OSError:
+        return result
+    if size <= 0:
+        return result
+
+    try:
+        with path.open("rb") as fh:
+            blob = fh.read(min(size, _T02_PROBE_MAX_BYTES))
     except OSError:
         return result
 
+    # Strategy 1: scan raw bytes (first 256 KB only — plain-text legacy headers
+    # are always near the start, and decoding multi-MB blobs is wasted CPU).
+    try:
+        raw_text = blob[:262144].decode("latin-1", errors="ignore")
+    except Exception:
+        raw_text = ""
+    _absorb_text(raw_text, result)
+
+    def _have_enough() -> bool:
+        """Stop scanning once we have date+hour+coords+interval+marker+model."""
+        date_ok = (result["filepath_date"] is not None) or (
+            result["session_start"] is not None
+        )
+        return (
+            date_ok
+            and result["interval_s"]     is not None
+            and result["marker_name"]    is not None
+            and result["lat"]            is not None
+            and result["receiver_model"] is not None
+        )
+
+    if _have_enough():
+        return result
+
+    # Strategy 2: decompress BZh streams (cap at 8 to bound worst case;
+    # metadata is in block 0 for every Trimble format we've seen — extra
+    # blocks are pure measurement records).
     MAGIC = b"BZh"
+    blocks_scanned = 0
     offset = 0
-    while True:
+    while blocks_scanned < 8:
         pos = blob.find(MAGIC, offset)
         if pos < 0:
             break
-        dec = b""
+        offset = pos + 1  # advance now so any `continue` doesn't loop forever
+        blocks_scanned += 1
         try:
-            dec = bz2.decompress(blob[pos:])
+            d = bz2.BZ2Decompressor()
+            dec = d.decompress(blob[pos:])
         except Exception:
-            try:
-                d = bz2.BZ2Decompressor()
-                dec = d.decompress(blob[pos:])
-            except Exception:
-                offset = pos + 1
-                continue
+            continue
+        if not dec:
+            continue
         try:
             text = dec.decode("ascii", errors="ignore")
         except Exception:
-            text = ""
-
-        if result["session_start"] is None:
-            m = _T02_RE_START.search(text)
-            if m:
-                result["session_start"] = m.group(1).strip()
-        if result["session_end"] is None:
-            m = _T02_RE_END.search(text)
-            if m:
-                result["session_end"] = m.group(1).strip()
-        if result["interval_s"] is None:
-            m = _T02_RE_INTERVAL_MS.search(text)
-            if m:
-                try:
-                    result["interval_s"] = str(int(m.group(1)) / 1000.0)
-                except (ValueError, ZeroDivisionError):
-                    pass
-        if result["interval_s"] is None:
-            m = _T02_RE_INTERVAL.search(text)
-            if m:
-                result["interval_s"] = m.group(1).strip()
-        if result["marker_name"] is None:
-            m = _T02_RE_MARKER.search(text)
-            if m:
-                result["marker_name"] = m.group(1).strip()
-        if result["lat"] is None:
-            m = _T02_RE_LLH.search(text)
-            if m:
-                try:
-                    result["lat"]      = float(m.group(1))
-                    result["lon"]      = float(m.group(2))
-                    result["height_m"] = float(m.group(3))
-                except ValueError:
-                    pass
-        # Fallback: grab any ISO-ish datetime if structured keys absent
-        if result["session_start"] is None:
-            for m in _T02_RE_DT_ANY.finditer(text):
-                result["session_start"] = m.group(1)
-                break
-
-        if all(v is not None for v in result.values()):
+            continue
+        _absorb_text(text, result)
+        if _have_enough():
             break
-        offset = pos + 1
 
     return result
 
@@ -878,12 +1008,38 @@ def _runpkr00_make_dat(
             shutil.rmtree(tw, ignore_errors=True)
 
 
+def _is_rt17_dat(dat: Path) -> bool:
+    """
+    Sniff runpkr00 output to detect whether records are RT17 (decodable by
+    convbin) or the newer RT27/CMRx format (Alloy-era receivers).
+
+    RT17 records start with STX (0x02). RT27 / modern Trimble DAT records
+    start with `0x74` ('t') or other non-STX bytes. Convbin only handles RT17,
+    so attempting conversion on non-RT17 .dat just produces an empty .obs.
+    Sniffing the first byte lets us fail fast with a clear status.
+    """
+    try:
+        with dat.open("rb") as fh:
+            head = fh.read(4)
+    except OSError:
+        return False
+    return len(head) > 0 and head[0] == 0x02
+
+
 def _convbin_on_dat(convbin_path: Path, dat: Path, obs_path: Path) -> None:
     """
     Convert runpkr00 .dat (RT17 format) → RINEX 3 obs + nav using convbin.
     Nav file is written alongside obs with .nav extension (used by SPP solver).
-    Raises ConverterError on failure.
+    Raises ConverterError on failure (incl. detected RT27 / unsupported format).
     """
+    # Fail fast on non-RT17 records — convbin would silently produce empty obs
+    if not _is_rt17_dat(dat):
+        raise ConverterError(
+            "unsupported_rt27: runpkr00 produced non-RT17 records "
+            "(modern Trimble Alloy / RT27 format — no open-source decoder available; "
+            "metadata extracted from T02 header instead)"
+        )
+
     nav_path = obs_path.with_suffix(".nav")
     for fp in (obs_path, nav_path):
         try:
@@ -1172,6 +1328,7 @@ def run_pipeline(cfg: PipelineConfig, progress_cb=None) -> Path:
                     _hdr = _probe_t02_header(p)
                     if station == "UNKNOWN" and _hdr.get("marker_name"):
                         station = re.sub(r"[^A-Z0-9]", "", _hdr["marker_name"].upper())[:8] or "UNKNOWN"
+                    # Fallback chain for date+hour: filename → SessionStart → filePath
                     if fn_date is None and _hdr.get("session_start"):
                         _t0 = _iso_from_t02_ts(_hdr["session_start"])
                         if _t0:
@@ -1181,6 +1338,11 @@ def run_pipeline(cfg: PipelineConfig, progress_cb=None) -> Path:
                                 fn_hour = _dt0.hour
                             except Exception:
                                 pass
+                    if fn_date is None and _hdr.get("filepath_date"):
+                        fn_date = _hdr["filepath_date"]
+                        fh = _hdr.get("filepath_hour")
+                        if fn_hour is None and isinstance(fh, int):
+                            fn_hour = fh
 
                     out_dir = rinex_dir / station
                     rinex_obs      = None
@@ -1191,20 +1353,46 @@ def run_pipeline(cfg: PipelineConfig, progress_cb=None) -> Path:
                         or (cfg.runpkr00_path and cfg.runpkr00_path.exists()
                             and has_convbin_cfg(cfg))
                     )
-                    if has_converter:
+
+                    # Early-skip: if the probe identified an Alloy / RT27-era
+                    # receiver, don't waste 1-3 s on runpkr00 + convbin per
+                    # file just to confirm convbin can't decode the records.
+                    rx_model = (_hdr.get("receiver_model") or "").lower()
+                    is_rt27_receiver = any(
+                        m in rx_model for m in _RT27_RECEIVER_MARKERS
+                    )
+
+                    if has_converter and is_rt27_receiver:
+                        convert_status = "unsupported_rt27"
+                        convert_detail = (
+                            f"unsupported_rt27: {rx_model!r} records in RT27 / CMRx "
+                            "format (no open-source decoder); metadata extracted from "
+                            "T02 header instead"
+                        )
+                    elif has_converter:
                         try:
                             rinex_obs = convert_to_rinex(cfg, p, out_dir)
                         except ConverterError as ce:
                             rinex_obs      = None
-                            convert_status = "failed"
-                            convert_detail = str(ce)
+                            msg            = str(ce)
+                            # Distinguish "we can't decode this format" from a
+                            # genuine converter failure so the dashboard can
+                            # filter / report the two cases separately.
+                            if msg.startswith("unsupported_rt27"):
+                                convert_status = "unsupported_rt27"
+                            else:
+                                convert_status = "failed"
+                            convert_detail = msg
                         else:
                             convert_status = "ok" if rinex_obs else "failed"
                             if not rinex_obs:
                                 convert_detail = "converter ran but produced no output file"
 
                     attempted_by_station[station] = attempted_by_station.get(station, 0) + 1
-                    if convert_status == "ok":
+                    # Treat unsupported_rt27 as "done" for stop_after_success_per_station —
+                    # every file from the same Alloy receiver hits the same wall,
+                    # so retrying wastes runpkr00 time. Probe metadata is already saved.
+                    if convert_status in ("ok", "unsupported_rt27"):
                         success_by_station.add(station)
 
                     # Seed from bzip2 probe; RINEX conversion overrides below if available

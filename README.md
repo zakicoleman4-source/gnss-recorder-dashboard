@@ -1,224 +1,47 @@
 # GNSS Recorder Dashboard
 
-Local dashboard to scan `.to2` / `.to4` GNSS receiver files and visualize **recorded vs missing hours** by receiver and week.
+Offline Windows dashboard for scanning Trimble GNSS recordings (`.T02` / `.T04` / `.T01` / `.T00`) and visualising station coverage, sample rates, and gaps.
 
-This project provides **two** ways to run:
+## Install
 
-1. **Static local website (recommended here)**: generate `site/coverage.json`, then serve `site/` with Python’s built-in web server.
-2. **Streamlit app**: included, but on some Windows setups Streamlit can fail if `powershell.exe` is missing.
+1. Download or clone this repository to any folder on Windows.
+2. Double-click `INSTALL.bat`. It checks for Python 3.8+, creates `.venv\` inside the project folder, and installs dependencies.
+3. Double-click `RUN_DASHBOARD.bat`. It launches Streamlit on the first free port between 8501–8520.
+4. The browser opens at `http://localhost:850X`. Paste the data folder path into the sidebar and click **Scan now**.
 
-## Run (static website)
+## Requirements
 
-From this folder (one-time install):
+- Windows 10 / 11
+- Python 3.8 – 3.13 (download from <https://www.python.org/downloads/windows/>, tick **Add python.exe to PATH** during install)
+- Internet for the first run only (`INSTALL.bat` downloads packages via pip)
 
-```powershell
-python -m venv .venv
-.\.venv\Scripts\python -m pip install -r requirements.txt
-```
+## What gets scanned
 
-### 1) Scan data into the DB (ready for server)
+The pipeline reads each `.T02` / `.T04` file's bzip2-embedded metadata block to extract:
 
-```powershell
-.\.venv\Scripts\python scan_to_db.py --data-root "D:\path\to\2026" --db "gnss.db"
-```
+- Station / marker name
+- Receiver coordinates (lat / lon / height)
+- Session date and hour
+- Sample interval (`SessionMeasIntervalMsecs`)
 
-### 2) Run the server (your PM opens the same URL)
+It then attempts to convert the binary to RINEX 3 using bundled `runpkr00.exe` (Trimble unpacker) → `convbin.exe` (RTKLIB). When the conversion succeeds, the dashboard also shows per-file completeness, epoch counts, intra-file gaps, and the constellation / signal list.
 
-```powershell
-.\.venv\Scripts\python server.py
-```
+## Modern Trimble Alloy receivers (RT27 limitation)
 
-Open: `http://127.0.0.1:8501`
+Modern Trimble Alloy receivers record measurement data in the **RT27** format (extended RT17 with multi-constellation records). RTKLIB `convbin` only decodes the older RT17 format; the open-source tool chain cannot extract observations from RT27. Files that hit this case are marked `convert_status = unsupported_rt27` in the manifest, and only the bzip2 header metadata is used. Coverage analysis, station maps, and date/hour gap detection still work — only per-file epoch analytics are missing.
 
-To require a password (recommended if hosted publicly):
+Trimble's proprietary `convertToRINEX` GUI is the only tool that handles RT27, and Trimble has no working command-line mode (verified on 2.1.1.0 and 3.14.0). If full RINEX conversion is required, run that tool by hand on the affected files.
 
-```powershell
-$env:GNSS_DASH_USER="admin"
-$env:GNSS_DASH_PASS="change-me"
-.\.venv\Scripts\python server.py
-```
+## Bundled tools (`tools/`)
 
-To let your PM open it from another PC on the same network:
+- `tools\runpkr00\runpkr00.exe` — Trimble proprietary T02 / T04 → DAT unpacker
+- `tools\rtklib\convbin.exe` — RTKLIB DAT (RT17) → RINEX 3 converter
+- `tools\rtklib\rnx2rtkp.exe` — RTKLIB single-point position solver (used as a coord fallback when the T02 header has no `RefStationLLH`)
 
-```powershell
-$env:GNSS_HOST="0.0.0.0"
-.\.venv\Scripts\python server.py
-```
+## Repository layout
 
-Then your PM visits: `http://<YOUR-IP>:8501`
-
-## Host on the internet (recommended approach)
-
-You have two choices:
-
-1. **Upload the DB to the server** (fastest): run the scan locally, then copy `gnss.db` to the server.
-2. **Scan on the server**: the server must have access to the `2026` folder (upload or mounted drive).
-
-### Option A: Docker on a VPS (simple + reliable)
-
-1) Build & run locally (sanity check):
-
-```powershell
-docker build -t gnss-dashboard .
-docker run --rm -p 8080:8080 `
-  -e GNSS_DASH_USER="admin" -e GNSS_DASH_PASS="change-me" `
-  -e GNSS_DB_PATH="/data/gnss.db" `
-  -v "${PWD}\gnss.db:/data/gnss.db" `
-  gnss-dashboard
-```
-
-Open: `http://localhost:8080`
-
-2) Deploy to a VPS (Ubuntu, etc.):
-- Install Docker
-- Copy this project and your `gnss.db` to the server
-- Run the same `docker run` command (use a strong password)
-- Put it behind HTTPS (Caddy / Nginx) or use a platform that gives HTTPS automatically
-
-## Quickest free public link (no VPS): Cloudflare Tunnel
-
-This runs the server on your PC and gives you a public HTTPS URL your PM can open internationally.
-
-```powershell
-cd c:\Aj\LINGBOT\gnss-recorder-dashboard
-
-# Optional: set these first (otherwise the script will prompt)
-. .\ENV.example.ps1
-
-# One-command setup + scan + run + tunnel
-.\quickstart_public_cloudflare.ps1
-```
-
-Your PM uses the printed `https://*.trycloudflare.com` URL and the username/password you set.
-
-Important: your PC must stay on while your PM uses the dashboard.
-
-If you already scanned and just want to restart without rescanning:
-
-```powershell
-.\quickstart_public_cloudflare.ps1 -SkipScan
-```
-
-## v2 (map + VRS) built alongside current site
-
-This repo includes a **v2** site (does not affect the currently running link until you restart using `server_v2.py`).
-
-- Start v2 server:
-
-```powershell
-.\.venv\Scripts\python server_v2.py
-```
-
-- Import receiver locations (map + VRS) from CSV:
-
-```powershell
-.\.venv\Scripts\python import_receivers_csv.py --csv ".\receivers.csv" --db "gnss.db"
-```
-
-Template: `receivers_template.csv`
-
-## Offline TO2/T02 workflow (planned + partial tools)
-
-This project includes helpers to bundle conversion tools for offline use:
-
-```powershell
-cd c:\Aj\LINGBOT\gnss-recorder-dashboard
-.\.venv\Scripts\python download_rtklib_tools.py
-```
-
-This downloads and extracts `convbin.exe` into `tools/rtklib/` (for TO2/T02 → RINEX conversion).
-
-## Offline install (no internet)
-
-If the target PC already has Python, use:
-
-- `gnss-recorder-dashboard/offline_installer/README_OFFLINE_INSTALL.md`
-- `gnss-recorder-dashboard/offline_installer/INSTALL_OFFLINE.bat`
-
-## Offline-friendly setup (recommended for your end user)
-
-Your user should not need to type `pip` commands. From PowerShell in this folder:
-
-```powershell
-.\setup_env.ps1
-.\run_dashboard.ps1
-```
-
-Dependencies for the Streamlit dashboard are in `requirements_streamlit.txt` (smaller than server requirements).
-
-## Expected folder layout
-
-This works best if your data is organized like:
-
-`<root>\<year>\<day>\<receiver-folder>\<files...>`
-
-Examples:
-
-- `D:\GNSS\2026\20260401\RECV_A\ABCD...to2`
-- `D:\GNSS\2026\120\RECV_B\WXYZ...to4`  (day-of-year)
-
-Receiver is inferred from the **leading letters** of the filename (prefix), and hour is inferred from:
-
-- a `00..23` token in the filename, or
-- a single letter `A..X` meaning hour `0..23` (common schemes).
-
-If your naming is different, share 2–3 example file paths and I’ll tune the parser.
-
-## GNSS Recorder Dashboard (shareable link)
-
-This Streamlit app analyzes GNSS recording coverage from a **manifest** (CSV/JSON) generated by the scanner.
-
-The intended “share a link” workflow is:
-
-- Scan big datasets locally (fast + private)
-- Share only the small `_manifests/` output as a zip
-- Deploy the Streamlit app on a free host (Streamlit Community Cloud or Hugging Face Spaces)
-
-### 1) Generate manifests locally
-
-Example (RINEX/CRINEX):
-
-```powershell
-python scan_gnss_folder.py "C:\path\to\data" --parse_rinex_headers
-```
-
-Example (GeoNet `.T02/.T04`):
-
-```powershell
-python scan_gnss_folder.py "C:\path\to\geonet_download" --include_ext .t02,.t04
-```
-
-This produces:
-
-- `<root>_scanned/_manifests/files_manifest.csv`
-- `<root>_scanned/_manifests/summary.json`
-
-### 2) Create a shareable zip (manifests only)
-
-```powershell
-python make_manifests_zip.py "C:\path\to\<root>_scanned\_manifests"
-```
-
-Output:
-
-- `C:\path\to\<root>_scanned\manifests.zip`
-
-### 3) Host the app for free (Streamlit Community Cloud)
-
-1. Put this folder (`gnss-recorder-dashboard/`) in a GitHub repo.
-2. Deploy `streamlit_app.py` as the entrypoint.
-3. In the deployed app sidebar, choose:
-   - **URL (zip of manifests)** and paste your `manifests.zip` URL, or
-   - **Upload (zip of manifests)** if you don’t want to host the zip publicly.
-
-Optional (recommended): set an environment variable on the host so it auto-loads:
-
-- `GNSS_MANIFESTS_ZIP_URL=<https://.../manifests.zip>`
-
-### Local run
-
-```powershell
-pip install -r requirements.txt
-python -m streamlit run streamlit_app.py
-```
-
+- `dashboard.py` — Streamlit UI (the entry point)
+- `to2_pipeline.py` — scan + probe + convert + manifest export
+- `scan_gnss_folder.py` — standalone CLI scanner (kept for parity with the dashboard's "scan now" path)
+- `requirements.txt` — `pandas`, `numpy`, `plotly`, `streamlit`, `requests`
+- `INSTALL.bat` / `RUN_DASHBOARD.bat` — Windows-friendly install + launch
