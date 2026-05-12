@@ -66,8 +66,8 @@ geonet_*/
 tmp_*/
 _tmp_*/
 
-# ── Converter / binary tools (distribute separately) ─────────────────────────
-tools/
+# tools/ is tracked — binaries committed directly
+tools/cloudflared.exe
 
 # ── Offline installer wheel caches (large binaries — distribute separately) ───
 offline_installer/wheelhouse/
