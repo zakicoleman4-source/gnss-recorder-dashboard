@@ -25,7 +25,9 @@ _PIPELINE_LOCK = threading.Lock()
 
 
 TO_EXTS = {".to2", ".t02", ".to4", ".t04"}
-STATION_RE = re.compile(r"^([A-Za-z]{3,4})")
+# Match station prefix before an embedded year (19xx/20xx) or a 3-digit DOY+hour-letter.
+# Handles alpha stations (AHTI), numeric VRS stations (2406), and RINEX2-style names (INVK119a).
+STATION_RE = re.compile(r"^([A-Za-z0-9]{3,9})(?=(?:19|20)\d{2}|\d{3}[a-xA-X])", re.IGNORECASE)
 
 _THIS_DIR = Path(__file__).resolve().parent
 
@@ -135,8 +137,9 @@ def _station_from_filename(name: str) -> str:
 
 
 # ── Filename timestamp parsing ────────────────────────────────────────────────
+# Format 1: {STATION}{YYYY}{MM}{DD}{HH}{MM}[SS][a].T02  e.g. AHTI202603010100a.T02
 _FN_DT_MMDD = re.compile(
-    r"[A-Za-z]{0,4}"
+    r"[A-Za-z0-9]{0,9}"
     r"((?:19|20)\d{2})"
     r"(0[1-9]|1[0-2])"
     r"(0[1-9]|[12]\d|3[01])"
@@ -147,8 +150,9 @@ _FN_DT_MMDD = re.compile(
     r"(?=\.)",
     re.IGNORECASE,
 )
+# Format 2: {STATION}{YYYY}{DOY}{HH}{MM}[SS][a].T02  e.g. AHTI2026060010a.T02
 _FN_DT_DOY = re.compile(
-    r"[A-Za-z]{0,4}"
+    r"[A-Za-z0-9]{0,9}"
     r"((?:19|20)\d{2})"
     r"(00[1-9]|0[1-9]\d|[12]\d{2}|3[0-5]\d|36[0-6])"
     r"([01]\d|2[0-3])"
@@ -158,10 +162,29 @@ _FN_DT_DOY = re.compile(
     r"(?=\.)",
     re.IGNORECASE,
 )
+# Format 3: {STATION}{DOY}{h}.T02  RINEX2-style, hour = letter a-x (a=0..x=23)
+# No year in filename — year must come from directory path.  e.g. INVK119a.T02
+_FN_DT_RINEX2 = re.compile(
+    r"^[A-Za-z0-9]{3,9}"
+    r"(00[1-9]|0[1-9]\d|[12]\d{2}|3[0-5]\d|36[0-6])"
+    r"([a-x])"
+    r"(?=\.)",
+    re.IGNORECASE,
+)
 
 
-def _parse_filename_dt(name: str) -> tuple[Optional[str], Optional[int]]:
-    """Return (iso_date, hour) from Trimble filename, or (None, None)."""
+def _year_from_path(path: Path) -> Optional[int]:
+    """Scan parent directory names for a 4-digit year (19xx/20xx)."""
+    for part in reversed(path.parts[:-1]):
+        if re.fullmatch(r"(?:19|20)\d{2}", part):
+            return int(part)
+    return None
+
+
+def _parse_filename_dt(name: str, path: Optional[Path] = None) -> tuple[Optional[str], Optional[int]]:
+    """Return (iso_date, hour) from Trimble filename, or (None, None).
+    Pass path to enable RINEX2 letter-hour format (year extracted from parent dirs).
+    """
     import datetime as _dt
 
     m = _FN_DT_MMDD.search(name)
@@ -180,6 +203,18 @@ def _parse_filename_dt(name: str) -> tuple[Optional[str], Optional[int]]:
         except (ValueError, OverflowError):
             pass
 
+    # RINEX2 letter-hour: DOY + letter (a=0..x=23), year from directory path
+    m = _FN_DT_RINEX2.match(name)
+    if m:
+        try:
+            doy = int(m.group(1))
+            hour = ord(m.group(2).lower()) - ord('a')
+            year = _year_from_path(path) if path else None
+            if year and 0 <= hour <= 23 and 1 <= doy <= 366:
+                return (_dt.date(year, 1, 1) + _dt.timedelta(days=doy - 1)).isoformat(), hour
+        except (ValueError, OverflowError):
+            pass
+
     return None, None
 
 
@@ -189,8 +224,12 @@ def _parse_filename_dt(name: str) -> tuple[Optional[str], Optional[int]]:
 # naming convention and requires no external tools.
 _T02_RE_START    = re.compile(r"(?:SessionStart|StartTime|session_start)\s*[=:]\s*([0-9T:.\-Z+]{10,30})", re.IGNORECASE)
 _T02_RE_END      = re.compile(r"(?:SessionEnd|EndTime|session_end)\s*[=:]\s*([0-9T:.\-Z+]{10,30})", re.IGNORECASE)
+# SessionMeasIntervalMsecs (GeoNet T02 format) stores interval in milliseconds.
+# Plain Interval/SampleRate/Rate stores it in seconds.
+_T02_RE_INTERVAL_MS = re.compile(r"SessionMeasIntervalMsecs\s*[=:]\s*([0-9]+)", re.IGNORECASE)
 _T02_RE_INTERVAL = re.compile(r"(?:Interval|SampleRate|Rate)\s*[=:]\s*([0-9]+(?:\.[0-9]+)?)", re.IGNORECASE)
-_T02_RE_MARKER   = re.compile(r"(?:MarkerName|SiteName|Station|marker)\s*[=:]\s*([A-Za-z0-9_\-]{2,20})", re.IGNORECASE)
+# GeoNet T02 uses RefStationName / RefStationCode; older formats use MarkerName / SiteName / Station.
+_T02_RE_MARKER   = re.compile(r"(?:RefStationName|RefStationCode|MarkerName|SiteName|Station|marker)\s*[=:]\s*([A-Za-z0-9_\-]{2,20})", re.IGNORECASE)
 _T02_RE_DT_ANY   = re.compile(r"((?:19|20)\d{2}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2})?(?:Z|[+-]\d{2}:\d{2})?)")
 
 
@@ -236,6 +275,13 @@ def _probe_t02_header(path: Path) -> dict:
             m = _T02_RE_END.search(text)
             if m:
                 result["session_end"] = m.group(1).strip()
+        if result["interval_s"] is None:
+            m = _T02_RE_INTERVAL_MS.search(text)
+            if m:
+                try:
+                    result["interval_s"] = str(int(m.group(1)) / 1000.0)
+                except (ValueError, ZeroDivisionError):
+                    pass
         if result["interval_s"] is None:
             m = _T02_RE_INTERVAL.search(text)
             if m:
@@ -1070,7 +1116,7 @@ def run_pipeline(cfg: PipelineConfig, progress_cb=None) -> Path:
                 progress_cb(i, total, str(p))
 
             station  = _station_from_filename(p.name)
-            fn_date, fn_hour = _parse_filename_dt(p.name)
+            fn_date, fn_hour = _parse_filename_dt(p.name, p)
 
             if cfg.stop_after_success_per_station and station in success_by_station:
                 continue
@@ -1213,6 +1259,20 @@ def run_pipeline(cfg: PipelineConfig, progress_cb=None) -> Path:
                             completeness_pct = (
                                 min(100.0, round(total_epochs / expected_epochs * 100, 2))
                                 if expected_epochs > 0 else None
+                            )
+
+                    # Fallback: for files with a known hour (standard 1-hour GeoNet
+                    # convention) infer 3600 s duration when probe + RINEX both failed.
+                    if dur_s is None and fn_hour is not None and fn_date is not None:
+                        dur_s = 3600.0
+
+                    # Completeness from probe interval when RINEX epoch stats unavailable.
+                    if (expected_epochs is None and dur_s and dur_s > 0
+                            and interval_s and interval_s > 0):
+                        expected_epochs = max(1, round(dur_s / interval_s))
+                        if completeness_pct is None:
+                            completeness_pct = min(
+                                100.0, round(total_epochs / expected_epochs * 100, 2)
                             )
 
             except Exception as e:

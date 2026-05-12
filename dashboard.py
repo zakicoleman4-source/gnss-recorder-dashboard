@@ -80,7 +80,7 @@ _TS_REGEXES = [
     re.compile(r"(20\d{2})([01]\d)([0-3]\d)([0-2]\d)([0-5]\d)"),            # YYYYMMDDHHMM
     re.compile(r"(20\d{2})([01]\d)([0-3]\d)([0-2]\d)"),                      # YYYYMMDDHH
 ]
-_RINEX2_REGEX = re.compile(r"^[A-Za-z0-9]{4}(\d{3})(\d)$")  # e.g. basc0010
+_RINEX2_REGEX = re.compile(r"^[A-Za-z0-9]{3,9}(\d{3})([a-x])$", re.IGNORECASE)  # e.g. INVK119a
 _RINEX3_NAME_DOY_HHMM = re.compile(r"_R_(?P<year>20\d{2})(?P<doy>\d{3})(?P<hhmm>\d{4})_")
 
 
@@ -133,13 +133,17 @@ def _infer_ts_from_row(row: pd.Series) -> pd.Timestamp:
     m_rinex = _RINEX2_REGEX.match(stem)
     if m_rinex:
         doy = int(m_rinex.group(1))
-        hour = int(m_rinex.group(2))
-        year_m = re.search(r"(20\d{2})", joined)
+        hour_raw = m_rinex.group(2)
+        # group(2) is a letter a-x (RINEX2 convention: a=0..x=23)
+        hour = ord(hour_raw.lower()) - ord('a') if hour_raw.isalpha() else int(hour_raw)
+        # Prefer year from directory path (discovered_from), fall back to modified_utc
+        year_m = re.search(r"(?:^|[/\\])((?:19|20)\d{2})(?:[/\\])", joined)
         if year_m:
             year = int(year_m.group(1))
         else:
-            year = pd.to_datetime(row.get("modified_utc"), utc=True, errors="coerce").year
-        if pd.notna(year):
+            year_m2 = re.search(r"(20\d{2})", joined)
+            year = int(year_m2.group(1)) if year_m2 else None
+        if year and 0 <= hour <= 23 and 1 <= doy <= 366:
             jan1 = pd.Timestamp(year=int(year), month=1, day=1, tz="UTC")
             return jan1 + pd.Timedelta(days=doy - 1, hours=hour)
 
