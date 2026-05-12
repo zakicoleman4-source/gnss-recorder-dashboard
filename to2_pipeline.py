@@ -231,6 +231,8 @@ _T02_RE_INTERVAL = re.compile(r"(?:Interval|SampleRate|Rate)\s*[=:]\s*([0-9]+(?:
 # GeoNet T02 uses RefStationName / RefStationCode; older formats use MarkerName / SiteName / Station.
 _T02_RE_MARKER   = re.compile(r"(?:RefStationName|RefStationCode|MarkerName|SiteName|Station|marker)\s*[=:]\s*([A-Za-z0-9_\-]{2,20})", re.IGNORECASE)
 _T02_RE_DT_ANY   = re.compile(r"((?:19|20)\d{2}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2})?(?:Z|[+-]\d{2}:\d{2})?)")
+# GeoNet Trimble Alloy VRS: RefStationLLH:lat,lon,height  (decimal degrees, metres)
+_T02_RE_LLH      = re.compile(r"RefStationLLH\s*[=:]\s*(-?\d+\.\d+)\s*,\s*(-?\d+\.\d+)\s*,\s*(-?\d+\.\d+)", re.IGNORECASE)
 
 
 def _probe_t02_header(path: Path) -> dict:
@@ -240,7 +242,8 @@ def _probe_t02_header(path: Path) -> dict:
     Works with any filename convention.
     """
     result: dict = {"session_start": None, "session_end": None,
-                    "interval_s": None, "marker_name": None}
+                    "interval_s": None, "marker_name": None,
+                    "lat": None, "lon": None, "height_m": None}
     try:
         blob = path.read_bytes()[:65536]
     except OSError:
@@ -290,6 +293,15 @@ def _probe_t02_header(path: Path) -> dict:
             m = _T02_RE_MARKER.search(text)
             if m:
                 result["marker_name"] = m.group(1).strip()
+        if result["lat"] is None:
+            m = _T02_RE_LLH.search(text)
+            if m:
+                try:
+                    result["lat"]      = float(m.group(1))
+                    result["lon"]      = float(m.group(2))
+                    result["height_m"] = float(m.group(3))
+                except ValueError:
+                    pass
         # Fallback: grab any ISO-ish datetime if structured keys absent
         if result["session_start"] is None:
             for m in _T02_RE_DT_ANY.finditer(text):
@@ -1198,7 +1210,10 @@ def run_pipeline(cfg: PipelineConfig, progress_cb=None) -> Path:
                     # Seed from bzip2 probe; RINEX conversion overrides below if available
                     t_first = _iso_from_t02_ts(_hdr.get("session_start"))
                     t_last  = _iso_from_t02_ts(_hdr.get("session_end"))
-                    lat = lon = h_m = None
+                    # Probe coords (RefStationLLH in VRS files) — RINEX overrides if present
+                    lat    = _hdr.get("lat")
+                    lon    = _hdr.get("lon")
+                    h_m    = _hdr.get("height_m")
                     consts = sigs = None
                     dur_s = _duration_s(t_first, t_last)
                     if interval_s is None and _hdr.get("interval_s"):
