@@ -26,8 +26,9 @@ _PIPELINE_LOCK = threading.Lock()
 
 TO_EXTS = {".to2", ".t02", ".to4", ".t04", ".t00", ".t01"}
 # Match station prefix before an embedded year (19xx/20xx) or a 3-digit DOY+hour-letter.
-# Handles alpha stations (AHTI), numeric VRS stations (2406), and RINEX2-style names (INVK119a).
-STATION_RE = re.compile(r"^([A-Za-z0-9]{3,9})(?=(?:19|20)\d{2}|\d{3}[a-xA-X])", re.IGNORECASE)
+# Handles alpha stations (AHTI), numeric VRS stations (2406), names with _ (AB_C),
+# and RINEX2-style names (INVK119a, AB_C119a_1).
+STATION_RE = re.compile(r"^([A-Za-z0-9_]{3,9})(?=(?:19|20)\d{2}|\d{3}[a-xA-X])", re.IGNORECASE)
 # Fallback: client files may have reliable 3-4 char prefix but unreliable date suffix.
 # Allows _ and . inside code (e.g. AH_I, A.HTI); strips trailing _ . after match.
 _STATION_PREFIX_RE = re.compile(r"^([A-Za-z0-9][A-Za-z0-9_.]{2,3})", re.IGNORECASE)
@@ -137,7 +138,10 @@ def _pick_probe_files(
 def _station_from_filename(name: str) -> str:
     m = STATION_RE.match(name)
     if m:
-        return m.group(1).upper()
+        # Strip trailing _ . (separator chars accidentally pulled in by greedy match).
+        code = m.group(1).upper().rstrip("_.")
+        if len(code) >= 3:
+            return code
     # Fallback: first 3-4 chars; strip trailing _ . (separators, not part of code)
     m = _STATION_PREFIX_RE.match(name)
     if m:
@@ -173,13 +177,16 @@ _FN_DT_DOY = re.compile(
     r"(?=\.)",
     re.IGNORECASE,
 )
-# Format 3: {STATION}{DOY}{h}.T02  RINEX2-style, hour = letter a-x (a=0..x=23)
-# No year in filename — year must come from directory path.  e.g. INVK119a.T02
+# Format 3: {STATION}{DOY}{h}[_N|<other>].T02  RINEX2-style, hour = letter a-x (a=0..x=23)
+# Station may include _ (AB_C). After the hour letter the name may carry a
+# duplicate suffix (_1, _2) or any other trailing token before the extension.
+# No year in filename — year must come from directory path.
+# e.g. INVK119a.T02, AB_C119a_1.T02, AHTI060x_dup.T02
 _FN_DT_RINEX2 = re.compile(
-    r"^[A-Za-z0-9]{3,9}"
+    r"^[A-Za-z0-9_]{3,9}"
     r"(00[1-9]|0[1-9]\d|[12]\d{2}|3[0-5]\d|36[0-6])"
     r"([a-x])"
-    r"(?=\.)",
+    r"(?=[._]|$)",
     re.IGNORECASE,
 )
 
@@ -1004,7 +1011,10 @@ def _runpkr00_make_dat(
         raise ConverterError(f"runpkr00 failed to launch: {e}")
 
     if not dat.exists():
-        tw = Path(tempfile.mkdtemp(prefix="runpkr_gd_", dir=str(out_dir)))
+        try:
+            tw = Path(tempfile.mkdtemp(prefix="runpkr_gd_", dir=str(out_dir)))
+        except OSError as e:
+            raise ConverterError(f"runpkr00 tempdir create failed: {e}")
         try:
             alt = _runpkr00_gd_first_dat_or_tgd(runpkr00_path, inp, tw)
             if alt is None:
