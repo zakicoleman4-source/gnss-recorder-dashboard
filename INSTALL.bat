@@ -13,26 +13,6 @@ echo.
 echo Install started: %DATE% %TIME% > "%LOG%"
 echo Working dir: %HERE% >> "%LOG%"
 
-:: -- Non-ASCII path check (cmd globbing can break on extended chars) ----------
-echo %HERE% | findstr /R /C:"[^ -~]" >nul
-if not errorlevel 1 (
-  echo [gnss] WARNING: Install path contains non-ASCII characters.
-  echo [gnss] Some Python tooling may fail. Move the folder to a path like
-  echo [gnss]   C:\gnss-dashboard\ and re-run if install fails.
-  echo.
-)
-
-:: -- Long path warning ---------------------------------------------------------
-set "HERELEN=0"
-for /f %%L in ('cmd /c "echo %HERE%"^| find /v /c ""') do rem
-set "HERESTR=%HERE%"
-call :STRLEN HERESTR HERELEN
-if %HERELEN% GTR 100 (
-  echo [gnss] WARNING: Install path is %HERELEN% chars. Windows MAX_PATH=260.
-  echo [gnss] Long paths can break pip. Consider moving to C:\gnss-dashboard\.
-  echo.
-)
-
 :: -- Find Python (try python, py -3, py) -- reject Microsoft Store stub ------
 set PYEXE=
 set PYSRC=
@@ -257,16 +237,3 @@ if errorlevel 1 (
 )
 exit /b 0
 
-:: -- String length helper -----------------------------------------------------
-:STRLEN
-setlocal enabledelayedexpansion
-set "s=!%~1!#"
-set "len=0"
-for %%P in (4096 2048 1024 512 256 128 64 32 16 8 4 2 1) do (
-  if "!s:~%%P,1!" NEQ "" (
-    set /a "len+=%%P"
-    set "s=!s:~%%P!"
-  )
-)
-endlocal & set "%~2=%len%"
-exit /b 0
