@@ -536,7 +536,11 @@ def _geonet_station_coords(stations: "tuple[str, ...]", network: str = "NZ") -> 
         for batch_rows in pool.map(_fetch_batch, batches):
             all_rows.extend(batch_rows)
 
-    return pd.DataFrame(all_rows) if all_rows else pd.DataFrame(columns=["station", "lat", "lon", "site_name"])
+    if not all_rows:
+        return pd.DataFrame(columns=["station", "lat", "lon", "site_name"])
+    # GeoNet returns one row per epoch (open/close periods) -- dedupe to first
+    # per station so the downstream merge doesn't multiply manifest rows.
+    return pd.DataFrame(all_rows).drop_duplicates(subset="station", keep="first")
 
 
 def _manifest_to_sqlite(df: pd.DataFrame, out_path: Path) -> None:
@@ -1056,7 +1060,8 @@ def _build_event_ts(df_in: pd.DataFrame) -> pd.Series:
     if "inferred_date" in df_in.columns:
         dates = pd.to_datetime(df_in["inferred_date"], errors="coerce", utc=True)
         if "filename_hour" in df_in.columns:
-            hours = pd.to_numeric(df_in["filename_hour"], errors="coerce").fillna(0).astype("Int64")
+            # Clamp hours to [0, 23] so a corrupt manifest can't push dates by days.
+            hours = pd.to_numeric(df_in["filename_hour"], errors="coerce").fillna(0).clip(lower=0, upper=23).astype("Int64")
             mask = dates.notna()
             out.loc[mask] = dates.loc[mask] + pd.to_timedelta(hours.loc[mask].astype(float), unit="h")
         else:

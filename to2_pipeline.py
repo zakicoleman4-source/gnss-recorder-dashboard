@@ -771,8 +771,8 @@ def _parse_rinex_time(line: str) -> Optional[pd.Timestamp]:
         h = int(head[18:24].strip())
         mi = int(head[24:30].strip())
         sec = float(head[30:43].strip())
-        s = int(sec)
-        us = int(round((sec - s) * 1_000_000))
+        s = max(0, min(59, int(sec)))  # clamp -- leap second rounds down
+        us = max(0, min(int(round((sec - s) * 1_000_000)), 999_999))
         if 1900 <= y <= 2100 and 1 <= mo <= 12 and 1 <= d <= 31 and 0 <= h < 24 and 0 <= mi < 60:
             return pd.Timestamp(year=y, month=mo, day=d, hour=h, minute=mi, second=s, microsecond=us, tz="UTC")
     except Exception:
@@ -783,8 +783,8 @@ def _parse_rinex_time(line: str) -> Optional[pd.Timestamp]:
     try:
         y, mo, d, h, mi = [int(float(x)) for x in nums[:5]]
         sec = float(nums[5])
-        s = int(sec)
-        us = int(round((sec - s) * 1_000_000))
+        s = max(0, min(59, int(sec)))
+        us = max(0, min(int(round((sec - s) * 1_000_000)), 999_999))
         if not (1900 <= y <= 2100 and 1 <= mo <= 12 and 1 <= d <= 31):
             return None
         return pd.Timestamp(year=y, month=mo, day=d, hour=h, minute=mi, second=s, microsecond=us, tz="UTC")
@@ -916,7 +916,7 @@ def _patch_rinex_approx_pos(obs_path: Path, lat: float, lon: float, h: float) ->
         pass
 
 
-_VALID_SYS = set("GREJCISG")
+_VALID_SYS = set("GREJCIS")  # GPS, GLONASS, Galileo, QZSS, BeiDou, IRNSS, SBAS
 
 
 def _parse_rinex_signals(lines: list[str]) -> tuple[str | None, str | None]:
@@ -1313,18 +1313,18 @@ def run_pipeline(cfg: PipelineConfig, progress_cb=None) -> Path:
     exclude = [cfg.cache_dir]
 
     _PIPELINE_LOCK.acquire()
-
-    # Pre-flight: any stale WAL/SHM file from a killed process blocks DELETE-mode
-    # writes with "database is locked" because SQLite needs exclusive access to
-    # resolve the orphaned WAL before it can write. Delete sidecars after
-    # acquiring the lock so we never clobber another process's in-flight write.
-    for _suf in ("-wal", "-shm", "-journal"):
-        try:
-            Path(str(db_path) + _suf).unlink()
-        except OSError:
-            pass
     conn = None
     try:
+        # Pre-flight: any stale WAL/SHM file from a killed process blocks DELETE-mode
+        # writes with "database is locked" because SQLite needs exclusive access to
+        # resolve the orphaned WAL before it can write. Delete sidecars after
+        # acquiring the lock so we never clobber another process's in-flight write.
+        for _suf in ("-wal", "-shm", "-journal"):
+            try:
+                Path(str(db_path) + _suf).unlink()
+            except OSError:
+                pass
+
         conn = _db_connect(db_path)
         try:
             _db_init(conn)
@@ -1393,7 +1393,14 @@ def run_pipeline(cfg: PipelineConfig, progress_cb=None) -> Path:
         failed = 0
         skipped_empty = 0
 
-        conn.execute("BEGIN")
+        # Transaction batching. If BEGIN fails (e.g. immediately after a crashed
+        # prior connection), fall back to autocommit (isolation_level=None already
+        # enables that). Tracked via in_tx so subsequent COMMITs are skipped.
+        try:
+            conn.execute("BEGIN")
+            in_tx = True
+        except Exception:
+            in_tx = False
         for i, p in enumerate(files, start=1):
             if progress_cb:
                 # Never let a buggy callback (Streamlit threading, etc) abort scan.
@@ -1741,12 +1748,23 @@ def run_pipeline(cfg: PipelineConfig, progress_cb=None) -> Path:
                         _utc_now_iso(),
                     ),
                 )
-                if processed % 250 == 0:
+                if processed % 250 == 0 and in_tx:
+                    # Two-phase COMMIT/BEGIN: track each independently so a failure
+                    # in one doesn't leave the conn in an inconsistent transaction state.
                     try:
                         conn.execute("COMMIT")
+                    except Exception:
+                        # COMMIT failed — try to reset state with ROLLBACK so a fresh
+                        # BEGIN can start cleanly. If ROLLBACK also fails, fall back
+                        # to autocommit for the rest of the scan.
+                        try:
+                            conn.execute("ROLLBACK")
+                        except Exception:
+                            pass
+                    try:
                         conn.execute("BEGIN")
                     except Exception:
-                        pass
+                        in_tx = False  # remaining INSERTs autocommit individually
             except Exception:
                 failed += 1
 
@@ -1770,13 +1788,20 @@ def run_pipeline(cfg: PipelineConfig, progress_cb=None) -> Path:
                 except Exception:
                     pass
 
-        try:
-            conn.execute("COMMIT")
-        except Exception:
-            pass
+        if in_tx:
+            try:
+                conn.execute("COMMIT")
+            except Exception:
+                try:
+                    conn.execute("ROLLBACK")
+                except Exception:
+                    pass
     finally:
         if conn is not None:
-            conn.close()
+            try:
+                conn.close()
+            except Exception:
+                pass
         _PIPELINE_LOCK.release()
 
     return db_path
