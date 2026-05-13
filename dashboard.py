@@ -1111,7 +1111,7 @@ def _build_event_ts(df_in: pd.DataFrame) -> pd.Series:
     return out
 
 
-df["size_mb"] = df["size_bytes"] / (1024 * 1024)
+df["size_mb"] = pd.to_numeric(df.get("size_bytes"), errors="coerce") / (1024 * 1024)
 with st.spinner("Inferring event timestamps..."):
     df["event_ts_utc"] = _build_event_ts(df)
 df["event_hour_utc"] = df["event_ts_utc"].dt.floor(pd.Timedelta(hours=1))
