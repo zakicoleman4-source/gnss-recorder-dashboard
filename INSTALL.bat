@@ -66,7 +66,7 @@ if "%PYEXE%"=="" (
   echo [gnss] ERROR: Python not found, or only Microsoft Store stub is installed.
   echo [gnss] Download from https://www.python.org/downloads/windows/
   echo [gnss] Tick "Add python.exe to PATH" during install, then re-run this.
-  echo ERROR: no Python found (MS Store stub rejected) >> "%LOG%"
+  echo ERROR: no Python found, MS Store stub rejected >> "%LOG%"
   echo.
   pause
   exit /b 1
@@ -127,8 +127,8 @@ echo [gnss] Creating virtual environment...
 %PYEXE% -m venv "%VENV%" >>"%LOG%" 2>&1
 if errorlevel 1 (
   echo [gnss] ERROR: venv creation failed. Common causes:
-  echo [gnss]   - Antivirus blocking Python writes (try whitelisting %HERE%)
-  echo [gnss]   - Read-only folder (do not install under Program Files)
+  echo [gnss]   - Antivirus blocking Python writes, whitelist %HERE%
+  echo [gnss]   - Read-only folder, do not install under Program Files
   echo [gnss]   - Disk full
   echo [gnss] See: %LOG%
   pause
