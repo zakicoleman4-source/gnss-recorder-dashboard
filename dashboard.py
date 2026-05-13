@@ -1085,18 +1085,27 @@ def _build_event_ts(df_in: pd.DataFrame) -> pd.Series:
     """
     out = pd.Series(pd.NaT, index=df_in.index, dtype="datetime64[ns, UTC]")
 
+    # Priority 0: use time_first_obs from RINEX header (most accurate -- comes
+    # straight from GNSS data, not filename parsing).
+    if "time_first_obs" in df_in.columns:
+        tfo = pd.to_datetime(df_in["time_first_obs"], errors="coerce", utc=True)
+        mask = tfo.notna()
+        if mask.any():
+            out.loc[mask] = tfo.loc[mask]
+
     # Priority 1: use inferred_date + filename_hour — pipeline already parsed DOY correctly.
     # Trimble T02 DOY filenames (e.g. INVK20261190100.T02) fail the YYYYMMDD regex below
     # but the pipeline stores the correct parsed date here.
+    # Only fill rows where Priority 0 (time_first_obs) didn't already set a value.
     if "inferred_date" in df_in.columns:
         dates = pd.to_datetime(df_in["inferred_date"], errors="coerce", utc=True)
         if "filename_hour" in df_in.columns:
             # Clamp hours to [0, 23] so a corrupt manifest can't push dates by days.
             hours = pd.to_numeric(df_in["filename_hour"], errors="coerce").fillna(0).clip(lower=0, upper=23).astype("Int64")
-            mask = dates.notna()
+            mask = dates.notna() & out.isna()
             out.loc[mask] = dates.loc[mask] + pd.to_timedelta(hours.loc[mask].astype(float), unit="h")
         else:
-            mask = dates.notna()
+            mask = dates.notna() & out.isna()
             out.loc[mask] = dates.loc[mask]
 
     fn = df_in.get("file_name", pd.Series([""] * len(df_in))).astype(str)

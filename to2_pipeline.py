@@ -1965,6 +1965,8 @@ def export_manifests(db_path: Path, out_dir: Path) -> Path:
               path                                 AS discovered_from,
               filename_date                        AS inferred_date,
               filename_hour,
+              time_first_obs,
+              time_last_obs,
               duration_s,
               interval_s,
               total_epochs,
@@ -1975,6 +1977,7 @@ def export_manifests(db_path: Path, out_dir: Path) -> Path:
               NULL                                 AS rinex_file_type,
               constellations,
               signals,
+              convert_status,
               lat,
               lon,
               height_m,
@@ -1990,11 +1993,14 @@ def export_manifests(db_path: Path, out_dir: Path) -> Path:
 
     expected_cols = [
         "station", "prefix", "file_name", "ext", "size_bytes", "modified_utc",
-        "discovered_from", "inferred_date", "filename_hour", "duration_s",
+        "discovered_from", "inferred_date", "filename_hour",
+        "time_first_obs", "time_last_obs",
+        "duration_s",
         "interval_s", "total_epochs", "expected_epochs", "completeness_pct",
         "intra_file_gap_count",
         "rinex_version", "rinex_file_type",
-        "constellations", "signals", "lat", "lon", "height_m",
+        "constellations", "signals", "convert_status",
+        "lat", "lon", "height_m",
         "ecef_x", "ecef_y", "ecef_z",
     ]
     if df.empty:
