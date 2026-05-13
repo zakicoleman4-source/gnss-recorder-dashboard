@@ -969,7 +969,7 @@ def _runpkr00_gd_first_dat_or_tgd(runpkr00_path: Path, inp: Path, work_dir: Path
         subprocess.run(
             [str(runpkr00_path), "-g", "-d", str(local)],
             cwd=str(work_dir),
-            capture_output=True, text=True, timeout=120, check=False,
+            capture_output=True, text=True, errors="replace", timeout=120, check=False,
             **_SUBPROC_KW,
         )
     except (subprocess.TimeoutExpired, Exception):
@@ -995,7 +995,7 @@ def _runpkr00_make_dat(
         p1 = subprocess.run(
             [str(runpkr00_path), "-devg", str(inp), str(base)],
             cwd=str(out_dir),
-            capture_output=True, text=True, timeout=120, check=False,
+            capture_output=True, text=True, errors="replace", timeout=120, check=False,
             **_SUBPROC_KW,
         )
     except subprocess.TimeoutExpired:
@@ -1068,7 +1068,7 @@ def _convbin_on_dat(convbin_path: Path, dat: Path, obs_path: Path) -> None:
                 "-os",                # include SNR
             ],
             cwd=str(obs_path.parent),
-            capture_output=True, text=True, timeout=180, check=False,
+            capture_output=True, text=True, errors="replace", timeout=180, check=False,
             **_SUBPROC_KW,
         )
     except subprocess.TimeoutExpired:
@@ -1108,7 +1108,7 @@ def _rnx2rtkp_spp(
                 str(obs_path),
                 str(nav_path),
             ],
-            capture_output=True, text=True, timeout=120, check=False,
+            capture_output=True, text=True, errors="replace", timeout=120, check=False,
             **_SUBPROC_KW,
         )
     except Exception:
@@ -1189,7 +1189,7 @@ def _convert_t02_ctr(ctr_exe: Path, inp: Path, out_dir: Path) -> Optional[Path]:
     try:
         r = subprocess.run(
             [str(ctr_exe), str(inp), "-p", str(out_dir), "-v", "3.04"],
-            capture_output=True, text=True, timeout=120, check=False,
+            capture_output=True, text=True, errors="replace", timeout=120, check=False,
             **_SUBPROC_KW,
         )
     except subprocess.TimeoutExpired:
@@ -1258,7 +1258,7 @@ def convert_to_rinex(cfg: PipelineConfig, inp: Path, out_dir: Path) -> Optional[
         out_dir.mkdir(parents=True, exist_ok=True)
         cmd = cfg.convert_cmd_template.format(input=str(inp), out_dir=str(out_dir))
         try:
-            p = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=180, **_SUBPROC_KW)
+            p = subprocess.run(cmd, shell=True, capture_output=True, text=True, errors="replace", timeout=180, **_SUBPROC_KW)
         except subprocess.TimeoutExpired:
             raise ConverterError("custom convert_cmd timed out (180s)")
         except Exception as e:
@@ -1343,7 +1343,14 @@ def run_pipeline(cfg: PipelineConfig, progress_cb=None) -> Path:
                 exclude_dirs=exclude,
             )
         else:
-            files = list(_iter_to_files(cfg.data_root, exclude_dirs=exclude))
+            # Cap unbounded discovery: a 10M-file tree would otherwise blow memory
+            # before the scan even starts.
+            from itertools import islice as _islice
+            _cap = max(1, int(cfg.probe_max_total_files or 200_000))
+            files = list(_islice(
+                _iter_to_files(cfg.data_root, exclude_dirs=exclude),
+                _cap,
+            ))
         total = max(1, len(files))
 
         # Load user-supplied station coordinates override (station → lat, lon, height_m).
@@ -1379,7 +1386,11 @@ def run_pipeline(cfg: PipelineConfig, progress_cb=None) -> Path:
         conn.execute("BEGIN")
         for i, p in enumerate(files, start=1):
             if progress_cb:
-                progress_cb(i, total, str(p))
+                # Never let a buggy callback (Streamlit threading, etc) abort scan.
+                try:
+                    progress_cb(i, total, str(p))
+                except Exception:
+                    pass
 
             station  = _station_from_filename(p.name)
             fn_date, fn_hour = _parse_filename_dt(p.name, p)
@@ -1557,36 +1568,44 @@ def run_pipeline(cfg: PipelineConfig, progress_cb=None) -> Path:
 
                     if rinex_obs and rinex_obs.exists():
                         hdr_lines = _read_rinex_header_lines(rinex_obs)
+                        # Per-line guard: one malformed record cannot discard metadata
+                        # already collected from preceding lines.
                         for ln in hdr_lines:
-                            if "TIME OF FIRST OBS" in ln:
-                                ts = _parse_rinex_time(ln)
-                                if ts is not None:
-                                    t_first = ts.isoformat()
-                            if "TIME OF LAST OBS" in ln:
-                                ts = _parse_rinex_time(ln)
-                                if ts is not None:
-                                    t_last = ts.isoformat()
-                            if "APPROX POSITION XYZ" in ln:
-                                xyz = _parse_rinex_position_xyz(ln)
-                                if xyz:
+                            try:
+                                if "TIME OF FIRST OBS" in ln:
+                                    ts = _parse_rinex_time(ln)
+                                    if ts is not None:
+                                        t_first = ts.isoformat()
+                                if "TIME OF LAST OBS" in ln:
+                                    ts = _parse_rinex_time(ln)
+                                    if ts is not None:
+                                        t_last = ts.isoformat()
+                                if "APPROX POSITION XYZ" in ln:
+                                    xyz = _parse_rinex_position_xyz(ln)
+                                    if xyz:
+                                        try:
+                                            lat, lon, h_m = _ecef_to_llh_wgs84(*xyz)
+                                        except ZeroDivisionError:
+                                            lat = lon = h_m = None
+                                # Use column-60+ label region to avoid matching comment text
+                                label = ln[60:].strip() if len(ln) > 60 else ""
+                                if label == "INTERVAL" and interval_s is None:
                                     try:
-                                        lat, lon, h_m = _ecef_to_llh_wgs84(*xyz)
-                                    except ZeroDivisionError:
-                                        lat = lon = h_m = None
-                            # Use column-60+ label region to avoid matching comment text
-                            label = ln[60:].strip() if len(ln) > 60 else ""
-                            if label == "INTERVAL" and interval_s is None:
-                                try:
-                                    interval_s = _snap_interval(float(ln[:60].strip()))
-                                except (ValueError, TypeError):
-                                    pass
-                            if label == "MARKER NAME":
-                                raw = ln[:60].strip()
-                                if raw:
-                                    clean = re.sub(r"[^A-Z0-9_.]", "", raw.upper())[:8]
-                                    if len(clean) >= 3 and clean != station:
-                                        station = clean
-                        consts, sigs = _parse_rinex_signals(hdr_lines)
+                                        interval_s = _snap_interval(float(ln[:60].strip()))
+                                    except (ValueError, TypeError):
+                                        pass
+                                if label == "MARKER NAME":
+                                    raw = ln[:60].strip()
+                                    if raw:
+                                        clean = re.sub(r"[^A-Z0-9_.]", "", raw.upper())[:8]
+                                        if len(clean) >= 3 and clean != station:
+                                            station = clean
+                            except Exception:
+                                continue
+                        try:
+                            consts, sigs = _parse_rinex_signals(hdr_lines)
+                        except Exception:
+                            consts, sigs = None, None
                         dur_s = _duration_s(t_first, t_last)
 
                         # ── Backfill fn_date/fn_hour from RINEX when filename gave nothing ──
