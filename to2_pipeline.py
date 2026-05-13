@@ -477,7 +477,10 @@ def _probe_t02_header(path: Path) -> dict:
     # Strategy 2: decompress BZh streams (cap at 8 to bound worst case;
     # metadata is in block 0 for every Trimble format we've seen — extra
     # blocks are pure measurement records).
+    # Feed at most _BZ_SLICE bytes per block — metadata fits well inside,
+    # and we avoid decompressing megabytes of measurement records.
     MAGIC = b"BZh"
+    _BZ_SLICE = 512 * 1024  # 512 KB raw input → tens of KB metadata after decompression
     blocks_scanned = 0
     offset = 0
     while blocks_scanned < 8:
@@ -488,7 +491,7 @@ def _probe_t02_header(path: Path) -> dict:
         blocks_scanned += 1
         try:
             d = bz2.BZ2Decompressor()
-            dec = d.decompress(blob[pos:])
+            dec = d.decompress(blob[pos:pos + _BZ_SLICE])
         except Exception:
             continue
         if not dec:
