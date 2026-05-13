@@ -30,9 +30,12 @@ def _safe_min_date(series: "pd.Series", fallback: "_dt.date | None" = None) -> "
     """Return series.min().date(), or today (or fallback) when all-NaT / empty."""
     try:
         v = series.min()
-        if v is pd.NaT or pd.isna(v):
+        if pd.isna(v):
             return fallback or _dt.date.today()
-        return v.date()
+        try:
+            return v.date()
+        except AttributeError:
+            return fallback or _dt.date.today()
     except Exception:
         return fallback or _dt.date.today()
 
@@ -40,9 +43,12 @@ def _safe_min_date(series: "pd.Series", fallback: "_dt.date | None" = None) -> "
 def _safe_max_date(series: "pd.Series", fallback: "_dt.date | None" = None) -> "_dt.date":
     try:
         v = series.max()
-        if v is pd.NaT or pd.isna(v):
+        if pd.isna(v):
             return fallback or _dt.date.today()
-        return v.date()
+        try:
+            return v.date()
+        except AttributeError:
+            return fallback or _dt.date.today()
     except Exception:
         return fallback or _dt.date.today()
 
@@ -83,7 +89,7 @@ _TS_REGEXES = [
     re.compile(r"(20\d{2})([01]\d)([0-3]\d)([0-2]\d)([0-5]\d)"),            # YYYYMMDDHHMM
     re.compile(r"(20\d{2})([01]\d)([0-3]\d)([0-2]\d)"),                      # YYYYMMDDHH
 ]
-_RINEX2_REGEX = re.compile(r"^[A-Za-z0-9]{3,9}(\d{3})([a-x])$", re.IGNORECASE)  # e.g. INVK119a
+_RINEX2_REGEX = re.compile(r"^[A-Za-z0-9_]{3,9}(\d{3})([a-x])(?=[._]|$)", re.IGNORECASE)  # e.g. INVK119a, AB_C119a_1
 _RINEX3_NAME_DOY_HHMM = re.compile(r"_R_(?P<year>20\d{2})(?P<doy>\d{3})(?P<hhmm>\d{4})_")
 
 
@@ -429,21 +435,21 @@ def _safe_extract_zip(zpath: Path, dest: Path) -> None:
             except ValueError:
                 # Member tried to escape the destination directory -- skip it.
                 continue
-            # Cap uncompressed size before extracting.
-            extracted_bytes += int(info.file_size or 0)
-            if extracted_bytes > _MAX_EXTRACT_BYTES:
-                raise ValueError(
-                    f"Zip uncompressed size exceeded cap of {_MAX_EXTRACT_BYTES:,} bytes (zip bomb?)."
-                )
+            # Cap uncompressed size based on ACTUAL bytes written, not declared
+            # file_size which is forgeable. A real zip bomb has small declared
+            # size and expands huge during extraction.
             extracted_entries += 1
             target.parent.mkdir(parents=True, exist_ok=True)
             with z.open(info, "r") as src, target.open("wb") as dst:
-                # Stream the member in 1MB chunks so we don't materialise huge
-                # files in memory.
                 while True:
                     buf = src.read(1024 * 1024)
                     if not buf:
                         break
+                    extracted_bytes += len(buf)
+                    if extracted_bytes > _MAX_EXTRACT_BYTES:
+                        raise ValueError(
+                            f"Zip uncompressed bytes exceeded cap of {_MAX_EXTRACT_BYTES:,} (zip bomb?)."
+                        )
                     dst.write(buf)
 
 
