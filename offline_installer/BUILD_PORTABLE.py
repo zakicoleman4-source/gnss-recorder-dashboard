@@ -49,6 +49,8 @@ def main() -> int:
                     help="Output dir (default: dist/GNSS_Recorder_Dashboard_portable)")
     ap.add_argument("--keep-cache", action="store_true",
                     help="Keep downloaded zip + wheel cache for next run")
+    ap.add_argument("--zip", action="store_true",
+                    help="Also produce a .zip archive next to the output folder for distribution")
     args = ap.parse_args()
 
     root = Path(__file__).resolve().parent.parent
@@ -142,7 +144,16 @@ def main() -> int:
 
     total = sum(p.stat().st_size for p in out.rglob("*") if p.is_file())
     _log(f"build complete. total size: {total/1024/1024:.1f} MB")
-    _log(f"distribute: zip {out} -> ship to client")
+
+    if args.zip:
+        archive_base = out.parent / out.name
+        _log(f"zipping -> {archive_base}.zip (this can take a minute)")
+        archive = shutil.make_archive(str(archive_base), "zip", out.parent, out.name)
+        zsize = Path(archive).stat().st_size
+        _log(f"ZIP ready: {archive} ({zsize/1024/1024:.1f} MB)")
+        _log(f"distribute: send {archive} to client")
+    else:
+        _log(f"distribute: zip {out} -> ship to client  (or rerun with --zip)")
 
     if not args.keep_cache:
         shutil.rmtree(cache, ignore_errors=True)
