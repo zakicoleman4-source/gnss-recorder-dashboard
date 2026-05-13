@@ -31,7 +31,7 @@ set "PYTHONPATH=%HERE%;%PYTHONPATH%"
 set "PORT="
 for /L %%P in (8501,1,8520) do (
   if not defined PORT (
-    "%VENV%\Scripts\python.exe" -c "import socket; s=socket.socket(); s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1); s.bind(('127.0.0.1',%%P)); s.close()" >nul 2>&1
+    "%VENV%\Scripts\python.exe" -c "import socket; s=socket.socket(); s.bind(('127.0.0.1',%%P)); s.close()" >nul 2>&1
     if not errorlevel 1 set "PORT=%%P"
   )
 )
