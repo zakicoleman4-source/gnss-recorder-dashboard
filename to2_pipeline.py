@@ -655,6 +655,10 @@ def _parse_rinex_epochs(obs_path: Path, max_epochs: int = 500_000) -> dict:
                 ts: Optional[_dtime] = None
 
                 if rinex3:
+                    # Fast skip: epoch lines start with '>'. Observation lines
+                    # outnumber epoch lines ~30:1; cheap byte check beats regex.
+                    if not line or line[0] != ">":
+                        continue
                     m = _EPOCH_R3.match(line)
                     if m:
                         try:
@@ -1480,14 +1484,25 @@ def run_pipeline(cfg: PipelineConfig, progress_cb=None) -> Path:
         if cfg.station_coords_path and cfg.station_coords_path.exists():
             try:
                 sc_df = pd.read_csv(cfg.station_coords_path, dtype=str)
+                import math as _math
                 for _, row in sc_df.iterrows():
                     try:
-                        st   = str(row["station"]).strip().upper()
+                        _raw = row["station"]
+                        if pd.isna(_raw):
+                            continue
+                        st   = str(_raw).strip().upper()
+                        if not st or st.lower() in ("nan", "none", "<na>"):
+                            continue
                         lat_c = float(row["lat"])
                         lon_c = float(row["lon"])
                         h_c   = float(row.get("height_m", 0) or 0)
-                        if st:
-                            station_coords[st] = (lat_c, lon_c, h_c)
+                        # Validate ranges so a bad CSV row can't inject garbage coords
+                        # into every RINEX file for that station.
+                        if not all(_math.isfinite(v) for v in (lat_c, lon_c, h_c)):
+                            continue
+                        if not (-90.0 <= lat_c <= 90.0 and -180.0 <= lon_c <= 180.0):
+                            continue
+                        station_coords[st] = (lat_c, lon_c, h_c)
                     except Exception:
                         pass
             except Exception:
