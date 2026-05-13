@@ -1162,6 +1162,9 @@ for _req_col, _req_default in [("ext", ""), ("file_name", ""), ("size_bytes", 0)
     if _req_col not in df.columns:
         df[_req_col] = _req_default
 
+# Coerce size_bytes to numeric so .sum() and arithmetic never crash on object dtype.
+df["size_bytes"] = pd.to_numeric(df["size_bytes"], errors="coerce").fillna(0)
+
 # If lat/lon are missing (common for T02/T04-only datasets), best-effort enrich from GeoNet.
 # Suppress retries for the rest of the session if we already failed once -- otherwise
 # every interaction freezes the UI for ~3s waiting for a network timeout.
