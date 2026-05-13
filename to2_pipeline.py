@@ -324,18 +324,34 @@ def _validate_marker(s: Optional[str]) -> Optional[str]:
 
 
 def _absorb_text(text: str, result: dict) -> None:
-    """Run all probe regexes against `text` and fill missing fields in `result`."""
+    """Run all probe regexes against `text` and fill missing fields in `result`.
+
+    Fast path: each field's regex is only attempted if a CHEAP substring check
+    confirms the key keyword exists. This avoids 10+ full-text regex scans on
+    text blobs that don't contain the marker at all (typical case for
+    bzip2-decompressed binary chunks).
+    """
     if not text:
         return
-    if result["session_start"] is None:
+    # Cheap key-substring pre-checks (C-level scan) — skip regex if absent.
+    # Keys derived from the regex alternation, lowest cost lookup first.
+    has_session = "Session" in text or "session" in text or "StartTime" in text
+    has_interval = "Interval" in text or "interval" in text or "Rate" in text
+    has_marker = ("Marker" in text or "RefStation" in text or "Site" in text
+                  or "Station" in text or "marker" in text)
+    has_llh = "RefStationLLH" in text or "StationLLH" in text or "MarkerLLH" in text
+    has_filepath = "filePath" in text or "FilePath" in text
+    has_rx = "Receiver" in text or "receiver" in text
+
+    if has_session and result["session_start"] is None:
         m = _T02_RE_START.search(text)
         if m:
             result["session_start"] = m.group(1).strip()
-    if result["session_end"] is None:
+    if has_session and result["session_end"] is None:
         m = _T02_RE_END.search(text)
         if m:
             result["session_end"] = m.group(1).strip()
-    if result["interval_s"] is None:
+    if has_interval and result["interval_s"] is None:
         m = _T02_RE_INTERVAL_MS.search(text)
         if m:
             try:
@@ -344,22 +360,22 @@ def _absorb_text(text: str, result: dict) -> None:
                     result["interval_s"] = v
             except (ValueError, ZeroDivisionError):
                 pass
-    if result["interval_s"] is None:
-        m = _T02_RE_INTERVAL.search(text)
-        if m:
-            try:
-                v = float(m.group(1))
-                if 0.0 < v <= 3600.0:
-                    result["interval_s"] = v
-            except ValueError:
-                pass
-    if result["marker_name"] is None:
+        if result["interval_s"] is None:
+            m = _T02_RE_INTERVAL.search(text)
+            if m:
+                try:
+                    v = float(m.group(1))
+                    if 0.0 < v <= 3600.0:
+                        result["interval_s"] = v
+                except ValueError:
+                    pass
+    if has_marker and result["marker_name"] is None:
         m = _T02_RE_MARKER.search(text)
         if m:
             vm = _validate_marker(m.group(1))
             if vm:
                 result["marker_name"] = vm
-    if result["lat"] is None:
+    if has_llh and result["lat"] is None:
         m = _T02_RE_LLH.search(text)
         if m:
             try:
@@ -368,7 +384,7 @@ def _absorb_text(text: str, result: dict) -> None:
                     result["lat"], result["lon"], result["height_m"] = lat, lon, h
             except ValueError:
                 pass
-    if result["receiver_model"] is None:
+    if has_rx and result["receiver_model"] is None:
         m = _T02_RE_RX_MODEL.search(text)
         if m:
             v = m.group(1).strip()
@@ -376,7 +392,7 @@ def _absorb_text(text: str, result: dict) -> None:
             if v and not re.search(r"[A-Z][a-z]+[A-Z][a-z]", v):
                 result["receiver_model"] = v
     # filePath gives definitive date+hour even when filename is unparseable
-    if result["filepath_date"] is None:
+    if has_filepath and result["filepath_date"] is None:
         m = _T02_RE_FILEPATH.search(text)
         if m:
             try:
@@ -388,8 +404,8 @@ def _absorb_text(text: str, result: dict) -> None:
                     result["filepath_hour"] = hour
             except (ValueError, OverflowError):
                 pass
-    # Fallback: any ISO-ish datetime
-    if result["session_start"] is None:
+    # Fallback: any ISO-ish datetime (also gated by digit presence)
+    if result["session_start"] is None and "20" in text:
         m = _T02_RE_DT_ANY.search(text)
         if m:
             result["session_start"] = m.group(1)
@@ -964,12 +980,25 @@ def _patch_rinex_approx_pos(obs_path: Path, lat: float, lon: float, h: float) ->
     If APPROX POSITION XYZ is absent from the RINEX obs header, inject it
     before END OF HEADER. Silently no-ops on any error or if already present.
     """
+    import math as _m
+    # Reject non-finite or out-of-range inputs -- writing NaN into RINEX
+    # corrupts every downstream consumer.
+    if not all(_m.isfinite(v) for v in (lat, lon, h)):
+        return
+    if not (-90.0 <= lat <= 90.0 and -180.0 <= lon <= 180.0):
+        return
     try:
         raw = obs_path.read_bytes()
         text = raw.decode("ascii", errors="ignore")
     except Exception:
         return
-    if "APPROX POSITION XYZ" in text:
+    # Check col-60+ label region rather than substring, so a comment line
+    # mentioning APPROX POSITION XYZ doesn't fool us.
+    has_pos = any(
+        len(ln) > 60 and ln[60:].strip().startswith("APPROX POSITION XYZ")
+        for ln in text.splitlines()
+    )
+    if has_pos:
         return
     try:
         x, y, z = _llh_to_ecef(lat, lon, h)
