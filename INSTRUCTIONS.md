@@ -51,3 +51,11 @@ Fast (~60 files/s, no conversion needed). Run this first on any new dataset.
 - Re-running **Scan now** reuses the cache — only new or changed files are reprocessed.
 - The dashboard never uploads data anywhere. All processing runs locally.
 - Station names, timestamps, and coordinates come from the converted RINEX output — files with no embedded metadata are handled automatically.
+
+## Troubleshooting
+
+If `INSTALL.bat` fails or the dashboard does not start:
+
+1. Run `CLIENT_DOCTOR.bat` — diagnoses Python, venv state, bundled tools, network reachability.
+2. Run `SMOKE_TEST.bat` — runs the test suite to verify install integrity.
+3. Share the printed output and `install.log` with support.
