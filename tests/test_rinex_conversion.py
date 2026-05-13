@@ -133,6 +133,36 @@ def test_pipeline_end_to_end_two_stations():
         shutil.rmtree(cache, ignore_errors=True)
 
 
+def test_detect_dataset_mode_rt27_majority():
+    if not _have_test_data():
+        print("    SKIP: test data not present")
+        return
+    from to2_pipeline import detect_dataset_mode
+    r = detect_dataset_mode(_TEST_SRC, sample_n=5)
+    assert r["sampled"] == 5, f"expected 5 samples, got {r['sampled']}"
+    assert r["rt27_majority"], f"GeoNet 2026 dataset is all Alloy; expected rt27_majority=True, got {r}"
+    assert "trimble alloy" in r["rx_models"]
+
+
+def test_detect_dataset_mode_empty_dir():
+    from to2_pipeline import detect_dataset_mode
+    import tempfile as _tf
+    d = Path(_tf.mkdtemp(prefix="detect_empty_"))
+    try:
+        r = detect_dataset_mode(d, sample_n=5)
+        assert r["sampled"] == 0
+        assert not r["rt27_majority"]
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_detect_dataset_mode_missing_dir():
+    from to2_pipeline import detect_dataset_mode
+    r = detect_dataset_mode(Path("C:/__does_not_exist__"), sample_n=5)
+    assert r["sampled"] == 0
+    assert not r["rt27_majority"]
+
+
 if __name__ == "__main__":
     n_pass = n_fail = n_skip = 0
     for name, fn in list(globals().items()):

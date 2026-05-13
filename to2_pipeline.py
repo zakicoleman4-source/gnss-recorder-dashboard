@@ -483,6 +483,55 @@ def _probe_t02_header(path: Path) -> dict:
     return result
 
 
+def detect_dataset_mode(data_root: Path, sample_n: int = 5) -> dict:
+    """Sample up to `sample_n` T02 files under data_root, probe their bzip2 headers,
+    and report whether the dataset is RT27-majority (recommends ctr_first mode).
+
+    Returns dict:
+      - sampled:        int -- files actually probed
+      - rt27_count:     int -- files whose receiver_model matches RT27 markers
+      - rt27_majority:  bool -- True if rt27_count >= ceil(sampled / 2)
+      - rx_models:      list[str] -- unique receiver_model strings seen (lower-cased)
+      - markers:        list[str] -- unique marker_name strings seen
+    """
+    result = {
+        "sampled": 0,
+        "rt27_count": 0,
+        "rt27_majority": False,
+        "rx_models": [],
+        "markers": [],
+    }
+    if not data_root.exists():
+        return result
+
+    seen_models: set = set()
+    seen_markers: set = set()
+    sampled = 0
+    rt27 = 0
+    for p in _iter_to_files(data_root):
+        if sampled >= sample_n:
+            break
+        try:
+            hdr = _probe_t02_header(p)
+        except Exception:
+            continue
+        sampled += 1
+        rx = (hdr.get("receiver_model") or "").strip().lower()
+        if rx:
+            seen_models.add(rx)
+        if hdr.get("marker_name"):
+            seen_markers.add(hdr["marker_name"])
+        if rx and any(m in rx for m in _RT27_RECEIVER_MARKERS):
+            rt27 += 1
+
+    result["sampled"] = sampled
+    result["rt27_count"] = rt27
+    result["rt27_majority"] = sampled > 0 and rt27 * 2 >= sampled
+    result["rx_models"] = sorted(seen_models)
+    result["markers"] = sorted(seen_markers)
+    return result
+
+
 def _iso_from_t02_ts(s: Optional[str]) -> Optional[str]:
     """Parse a T02 header timestamp string to UTC ISO-format string. Never raises."""
     if not s:

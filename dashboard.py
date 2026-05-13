@@ -707,15 +707,35 @@ with st.sidebar:
         if use_convert and not can_convert:
             st.warning("runpkr00.exe or convbin.exe not found at the paths above. Conversion disabled.")
 
+        # Auto-detect RT27 majority by sampling header of first ~5 files in data_root.
+        # Cached per-path so we don't re-probe on every Streamlit rerun.
+        _ctr_auto = False
+        _ctr_auto_msg = ""
+        if can_ctr_default and data_root.exists():
+            cache_key = f"_ctr_auto::{data_root.resolve()}"
+            if cache_key not in st.session_state:
+                try:
+                    from to2_pipeline import detect_dataset_mode
+                    st.session_state[cache_key] = detect_dataset_mode(data_root.resolve(), sample_n=5)
+                except Exception:
+                    st.session_state[cache_key] = {"sampled": 0, "rt27_majority": False}
+            _det = st.session_state[cache_key]
+            if _det.get("rt27_majority"):
+                _ctr_auto = True
+                _ctr_auto_msg = f"detected RT27/Alloy in {_det.get('rt27_count', 0)}/{_det.get('sampled', 0)} probed files"
+
         ctr_first = st.checkbox(
             "CTR-first mode (skip runpkr00 — for RT27/Alloy-only datasets)",
-            value=can_ctr_default and not can_convert,
+            value=_ctr_auto or (can_ctr_default and not can_convert),
             help=(
                 "ON = go straight to convertToRinex_cli.exe without trying runpkr00+convbin first. "
                 "Use when all files are Trimble Alloy / RT27 (no receiver model in header). "
-                "Saves ~1 min per 1,000 files vs the default fallback path."
+                "Saves ~1 min per 1,000 files vs the default fallback path. "
+                "Auto-enabled when probed sample shows RT27-majority."
             ),
         )
+        if _ctr_auto_msg and ctr_first:
+            st.caption(f"  • auto: {_ctr_auto_msg}")
         if ctr_first and not can_ctr_default:
             st.warning("CTR-first requires convertToRinex_cli.exe — not found at path above.")
 
