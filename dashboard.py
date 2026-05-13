@@ -51,7 +51,10 @@ st.set_page_config(page_title="GNSS Recorder Dashboard", layout="wide")
 
 
 def _load_json(path: Path) -> dict:
-    return json.loads(path.read_text(encoding="utf-8"))
+    try:
+        return json.loads(path.read_text(encoding="utf-8", errors="ignore"))
+    except (OSError, json.JSONDecodeError):
+        return {}
 
 
 def _load_manifest_csv(path: Path) -> pd.DataFrame:
@@ -1016,8 +1019,17 @@ summary = _load_json(summary_json)
 try:
     _mf_stat = manifest_csv.stat()
     df = _load_manifest_csv_cached(str(manifest_csv), _mf_stat.st_mtime, _mf_stat.st_size)
-except Exception:
-    df = _load_manifest_csv(manifest_csv)
+except Exception as _cache_err:
+    try:
+        df = _load_manifest_csv(manifest_csv)
+    except Exception as _read_err:
+        st.error(
+            f"Could not read manifest CSV at `{manifest_csv}`:\n"
+            f"- cached read: {type(_cache_err).__name__}: {_cache_err}\n"
+            f"- uncached read: {type(_read_err).__name__}: {_read_err}\n"
+            "Re-scan the folder (force rescan) to regenerate the manifest."
+        )
+        st.stop()
 cap_df = _try_load_station_capabilities(manifests_dir)
 
 if df.empty:
