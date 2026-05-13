@@ -117,6 +117,25 @@ def _build_event_ts(df_in: "pd.DataFrame") -> "pd.Series":
     joined = df_path.str.cat(fn, sep=" ")
     out = pd.Series(pd.NaT, index=df_in.index, dtype="datetime64[ns, UTC]")
 
+    # Priority 0: time_first_obs from RINEX (most authoritative -- exported by
+    # to2_pipeline.export_manifests since the 2026-05-13 release).
+    if "time_first_obs" in df_in.columns:
+        tfo = pd.to_datetime(df_in["time_first_obs"], errors="coerce", utc=True)
+        mask = tfo.notna()
+        if mask.any():
+            out.loc[mask] = tfo.loc[mask]
+
+    # Priority 1: inferred_date + filename_hour (pipeline's filename DOY parse).
+    if "inferred_date" in df_in.columns:
+        dates = pd.to_datetime(df_in["inferred_date"], errors="coerce", utc=True)
+        if "filename_hour" in df_in.columns:
+            hours = pd.to_numeric(df_in["filename_hour"], errors="coerce").fillna(0).clip(0, 23).astype("Int64")
+            mask = dates.notna() & out.isna()
+            out.loc[mask] = dates.loc[mask] + pd.to_timedelta(hours.loc[mask].astype(float), unit="h")
+        else:
+            mask = dates.notna() & out.isna()
+            out.loc[mask] = dates.loc[mask]
+
     patterns = [
         (r"(20\d{2})([01]\d)([0-3]\d)([0-2]\d)([0-5]\d)([0-5]\d)", "%Y%m%d%H%M%S"),
         (r"(20\d{2})([01]\d)([0-3]\d)([0-2]\d)([0-5]\d)", "%Y%m%d%H%M"),
