@@ -21,8 +21,15 @@ echo.
 set /p FOLDER="Data folder path: "
 
 :RUN
+:: Strip surrounding double-quotes (clients paste "C:\path with spaces")
+if "%FOLDER:~0,1%"==^" if "%FOLDER:~-1%"==^" set "FOLDER=%FOLDER:~1,-1%"
 if "%FOLDER%"=="" (
   echo [probe] No folder given.
+  pause
+  exit /b 1
+)
+if not exist "%FOLDER%" (
+  echo [probe] ERROR: Folder does not exist: %FOLDER%
   pause
   exit /b 1
 )
