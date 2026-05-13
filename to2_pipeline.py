@@ -62,22 +62,35 @@ def _iter_to_files(root: Path, exclude_dirs: Optional[Iterable[Path]] = None) ->
     Walk `root` and yield TO2/T02/TO4/T04 files (case-insensitive).
     Tolerates bad symlinks / permission errors per file.
     Skips excluded subtrees in-place.
+
+    Hot path on 200k+ file trees; minimises Path() construction and resolve()
+    syscalls by working with raw os.walk strings until the final yield.
     """
-    excl_resolved: list[Path] = []
+    # Pre-compute exclude prefixes as normalized lowercase strings so we can
+    # do a single startswith() per dir instead of resolving every traversed
+    # directory.
+    excl_prefixes: list[str] = []
     for d in exclude_dirs or []:
         try:
-            excl_resolved.append(Path(d).resolve())
+            s = str(Path(d).resolve()).rstrip("\\/").lower()
+            if s:
+                excl_prefixes.append(s)
         except Exception:
             continue
 
-    def _is_excluded(dirpath_resolved: Path) -> bool:
-        for ed in excl_resolved:
-            try:
-                dirpath_resolved.relative_to(ed)
+    def _excluded(dirpath: str) -> bool:
+        if not excl_prefixes:
+            return False
+        norm = dirpath.rstrip("\\/").lower()
+        for p in excl_prefixes:
+            # Match exact dir or any subdir.
+            if norm == p or norm.startswith(p + "\\") or norm.startswith(p + "/"):
                 return True
-            except Exception:
-                continue
         return False
+
+    # Pre-compute lowercase extension set for faster endswith() checks.
+    # str.endswith with a tuple of suffixes is faster than Path.suffix.lower().
+    ext_tuple = tuple(TO_EXTS)
 
     try:
         walker = os.walk(root, onerror=lambda _e: None, followlinks=False)
@@ -85,29 +98,21 @@ def _iter_to_files(root: Path, exclude_dirs: Optional[Iterable[Path]] = None) ->
         return
 
     for dirpath, dirnames, filenames in walker:
-        try:
-            dp_resolved = Path(dirpath).resolve()
-        except Exception:
-            dp_resolved = Path(dirpath)
-        if excl_resolved:
-            keep = []
-            for d in list(dirnames):
-                try:
-                    if _is_excluded((dp_resolved / d).resolve()):
-                        continue
-                except Exception:
-                    pass
-                keep.append(d)
-            dirnames[:] = keep
-        if _is_excluded(dp_resolved):
+        if _excluded(dirpath):
+            dirnames[:] = []  # don't recurse into excluded subtree
             continue
+        if excl_prefixes:
+            # In-place prune dirnames matching excludes (so os.walk skips them).
+            dirnames[:] = [
+                d for d in dirnames
+                if not _excluded(os.path.join(dirpath, d))
+            ]
         for fn in filenames:
-            try:
-                p = Path(dirpath) / fn
-                if p.suffix.lower() in TO_EXTS:
-                    yield p
-            except Exception:
-                continue
+            if fn.lower().endswith(ext_tuple):
+                try:
+                    yield Path(dirpath) / fn
+                except Exception:
+                    continue
 
 
 def _pick_probe_files(
@@ -573,7 +578,12 @@ _STANDARD_INTERVALS = [
 
 
 def _snap_interval(raw: float) -> float:
-    """Round a detected epoch interval to the nearest standard GNSS recording rate."""
+    """Round a detected epoch interval to the nearest standard GNSS recording rate.
+    Falls back to 30.0 s when raw is NaN/inf/<=0 (typical GNSS default).
+    """
+    import math as _m
+    if raw is None or not _m.isfinite(raw) or raw <= 0:
+        return 30.0
     return min(_STANDARD_INTERVALS, key=lambda s: abs(s - raw))
 
 
@@ -631,8 +641,8 @@ def _parse_rinex_epochs(obs_path: Path, max_epochs: int = 500_000) -> dict:
                         try:
                             y, mo, d, h, mi = (int(m.group(i)) for i in range(1, 6))
                             sf = float(m.group(6))
-                            s = int(sf)
-                            us = min(int(round((sf - s) * 1_000_000)), 999_999)
+                            s = max(0, min(59, int(sf)))  # clamp -- leap sec rounds down
+                            us = max(0, min(int(round((sf - s) * 1_000_000)), 999_999))
                             ts = _dtime(y, mo, d, h, mi, s, us)
                         except Exception:
                             pass
@@ -656,8 +666,8 @@ def _parse_rinex_epochs(obs_path: Path, max_epochs: int = 500_000) -> dict:
                                         and 0 <= h <= 23 and 0 <= mi <= 59
                                         and 0 <= flag <= 6 and 1 <= nsv <= 99):
                                     y = 2000 + yy if yy < 80 else 1900 + yy
-                                    s = int(sf)
-                                    us = min(int(round((sf - s) * 1_000_000)), 999_999)
+                                    s = max(0, min(59, int(sf)))
+                                    us = max(0, min(int(round((sf - s) * 1_000_000)), 999_999))
                                     ts = _dtime(y, mo, d, h, mi, s, us)
                             except Exception:
                                 pass
@@ -1522,7 +1532,9 @@ def run_pipeline(cfg: PipelineConfig, progress_cb=None) -> Path:
                     # naming convention.
                     _hdr = _probe_t02_header(p)
                     if station == "UNKNOWN" and _hdr.get("marker_name"):
-                        station = re.sub(r"[^A-Z0-9]", "", _hdr["marker_name"].upper())[:8] or "UNKNOWN"
+                        # Keep _ and . to match RINEX MARKER NAME parser conventions
+                        _cln = re.sub(r"[^A-Z0-9_.]", "", _hdr["marker_name"].upper()).rstrip("_.")[:8]
+                        station = _cln if len(_cln) >= 3 else "UNKNOWN"
                     # Fallback chain for date+hour: filename → SessionStart → filePath
                     if fn_date is None and _hdr.get("session_start"):
                         _t0 = _iso_from_t02_ts(_hdr["session_start"])
@@ -1656,25 +1668,26 @@ def run_pipeline(cfg: PipelineConfig, progress_cb=None) -> Path:
                         hdr_lines = _read_rinex_header_lines(rinex_obs)
                         # Per-line guard: one malformed record cannot discard metadata
                         # already collected from preceding lines.
+                        # All checks use column-60+ label region per RINEX spec to avoid
+                        # matching comment lines that mention these labels.
                         for ln in hdr_lines:
                             try:
-                                if "TIME OF FIRST OBS" in ln:
+                                label = ln[60:].strip() if len(ln) > 60 else ""
+                                if label == "TIME OF FIRST OBS":
                                     ts = _parse_rinex_time(ln)
                                     if ts is not None:
                                         t_first = ts.isoformat()
-                                if "TIME OF LAST OBS" in ln:
+                                if label == "TIME OF LAST OBS":
                                     ts = _parse_rinex_time(ln)
                                     if ts is not None:
                                         t_last = ts.isoformat()
-                                if "APPROX POSITION XYZ" in ln:
+                                if label == "APPROX POSITION XYZ":
                                     xyz = _parse_rinex_position_xyz(ln)
                                     if xyz:
                                         try:
                                             lat, lon, h_m = _ecef_to_llh_wgs84(*xyz)
                                         except ZeroDivisionError:
                                             lat = lon = h_m = None
-                                # Use column-60+ label region to avoid matching comment text
-                                label = ln[60:].strip() if len(ln) > 60 else ""
                                 if label == "INTERVAL" and interval_s is None:
                                     try:
                                         interval_s = _snap_interval(float(ln[:60].strip()))
@@ -1683,7 +1696,7 @@ def run_pipeline(cfg: PipelineConfig, progress_cb=None) -> Path:
                                 if label == "MARKER NAME":
                                     raw = ln[:60].strip()
                                     if raw:
-                                        clean = re.sub(r"[^A-Z0-9_.]", "", raw.upper())[:8]
+                                        clean = re.sub(r"[^A-Z0-9_.]", "", raw.upper()).rstrip("_.")[:8]
                                         if len(clean) >= 3 and clean != station:
                                             station = clean
                             except Exception:
