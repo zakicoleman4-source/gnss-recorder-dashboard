@@ -793,6 +793,22 @@ with st.sidebar:
             st.error(f"Data folder not found or empty: {data_root!r}. Pick a real folder of .TO2/.T02 files.")
             st.stop()
 
+        # Guard: data folder must NOT be the same as or inside the cache folder.
+        # The pipeline excludes cache_dir from the walk, so a data_root inside
+        # cache_dir would silently yield zero files and look like an empty dataset.
+        try:
+            _dr_res = data_root.resolve()
+            _ca_res = cache_dir.resolve()
+            if _dr_res == _ca_res or _ca_res in _dr_res.parents:
+                st.error(
+                    f"Data folder ({_dr_res}) is the same as or inside the cache folder ({_ca_res}). "
+                    "The pipeline excludes the cache folder from scanning, so this would find no files. "
+                    "Pick a different cache folder (e.g., %USERPROFILE%\\.gnss_dash_cache)."
+                )
+                st.stop()
+        except OSError:
+            pass
+
         from to2_pipeline import PipelineConfig, export_manifests, run_pipeline
 
         if scan_clicked:
