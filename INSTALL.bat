@@ -10,6 +10,7 @@ echo [gnss] GNSS Recorder Dashboard - Installer
 echo [gnss] Log: %LOG%
 echo. > "%LOG%"
 
+:: ── Check Python ─────────────────────────────────────────────────────────────
 python --version >nul 2>&1
 if errorlevel 1 (
   echo [gnss] ERROR: Python not found on PATH.
@@ -43,6 +44,7 @@ exit /b 1
 
 :PY_OK
 
+:: ── Create venv ──────────────────────────────────────────────────────────────
 if not exist "%VENV%\Scripts\python.exe" (
   echo [gnss] Creating virtual environment...
   python -m venv "%VENV%" >>"%LOG%" 2>&1
@@ -53,17 +55,62 @@ if not exist "%VENV%\Scripts\python.exe" (
   )
 )
 
-"%VENV%\Scripts\python.exe" -m pip install --upgrade pip --quiet >>"%LOG%" 2>&1
+:: ── Upgrade pip ──────────────────────────────────────────────────────────────
+echo [gnss] Upgrading pip...
+"%VENV%\Scripts\python.exe" -m pip install --upgrade pip >>"%LOG%" 2>&1
 
-echo [gnss] Installing packages (1-3 min on first run)...
+:: ── Install packages ─────────────────────────────────────────────────────────
+echo [gnss] Installing packages (1-5 min on first run)...
 "%VENV%\Scripts\python.exe" -m pip install -r "%REQ%" >>"%LOG%" 2>&1
 if errorlevel 1 (
-  echo [gnss] ERROR: pip install failed. See install.log
+  echo [gnss] First attempt failed - retrying...
+  "%VENV%\Scripts\python.exe" -m pip install -r "%REQ%" >>"%LOG%" 2>&1
+  if errorlevel 1 (
+    echo [gnss] ERROR: pip install failed after retry. See install.log
+    pause
+    exit /b 1
+  )
+)
+
+:: ── Verify key packages actually installed ───────────────────────────────────
+echo [gnss] Verifying installation...
+set VERIFY_FAIL=0
+
+"%VENV%\Scripts\python.exe" -c "import streamlit" >nul 2>&1
+if errorlevel 1 (
+  echo [gnss] streamlit missing - installing separately...
+  "%VENV%\Scripts\python.exe" -m pip install streamlit >>"%LOG%" 2>&1
+  "%VENV%\Scripts\python.exe" -c "import streamlit" >nul 2>&1
+  if errorlevel 1 set VERIFY_FAIL=1
+)
+
+"%VENV%\Scripts\python.exe" -c "import pandas" >nul 2>&1
+if errorlevel 1 (
+  echo [gnss] pandas missing - installing separately...
+  "%VENV%\Scripts\python.exe" -m pip install pandas >>"%LOG%" 2>&1
+  "%VENV%\Scripts\python.exe" -c "import pandas" >nul 2>&1
+  if errorlevel 1 set VERIFY_FAIL=1
+)
+
+"%VENV%\Scripts\python.exe" -c "import plotly" >nul 2>&1
+if errorlevel 1 (
+  echo [gnss] plotly missing - installing separately...
+  "%VENV%\Scripts\python.exe" -m pip install plotly >>"%LOG%" 2>&1
+  "%VENV%\Scripts\python.exe" -c "import plotly" >nul 2>&1
+  if errorlevel 1 set VERIFY_FAIL=1
+)
+
+if "%VERIFY_FAIL%"=="1" (
+  echo.
+  echo [gnss] ERROR: Some packages could not be installed.
+  echo [gnss] Check your internet connection and see install.log for details.
+  echo.
   pause
   exit /b 1
 )
 
 echo.
+echo [gnss] All packages verified OK.
 echo [gnss] Done. Double-click RUN_DASHBOARD.bat to launch.
 echo.
 pause
