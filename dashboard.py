@@ -877,8 +877,23 @@ with st.sidebar:
                         st.cache_data.clear()
                     except Exception:
                         pass
-                db_path = run_pipeline(cfg, progress_cb=_cb)
-                manifests_dir = export_manifests(db_path, out_dir=cache_dir.resolve() / "exported")
+                try:
+                    db_path = run_pipeline(cfg, progress_cb=_cb)
+                except Exception as _scan_err:
+                    st.error(
+                        f"Scan failed: {type(_scan_err).__name__}: {_scan_err}\n"
+                        "Check your data folder path, cache folder permissions, and disk space."
+                    )
+                    st.stop()
+                try:
+                    manifests_dir = export_manifests(db_path, out_dir=cache_dir.resolve() / "exported")
+                except Exception as _exp_err:
+                    st.error(
+                        f"Export manifests failed: {type(_exp_err).__name__}: {_exp_err}\n"
+                        "Scan completed but the dashboard could not write manifests. "
+                        "Check cache folder permissions."
+                    )
+                    st.stop()
                 st.session_state["_gnss_last_scan_manifests_dir"] = str(manifests_dir.resolve())
                 st.session_state["_gnss_last_scan_cache_key"] = scan_cache_key
         # Post-flight summary: make it obvious what happened.
