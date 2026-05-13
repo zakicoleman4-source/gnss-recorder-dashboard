@@ -1164,6 +1164,15 @@ def _build_manifests_zip_bytes(manifest_csv_str: str, summary_json_str: str, sta
         z.write(summary_json_str, arcname="summary.json")
         if station_caps_str and Path(station_caps_str).exists():
             z.write(station_caps_str, arcname="station_capabilities.csv")
+        # Bundle gap CSVs if pipeline produced them (alongside files_manifest.csv)
+        manifest_dir = Path(manifest_csv_str).parent
+        for extra in ("coverage_gaps.csv", "intra_file_gaps.csv"):
+            extra_path = manifest_dir / extra
+            if extra_path.exists():
+                try:
+                    z.write(extra_path, arcname=extra)
+                except OSError:
+                    pass
     return zbuf.getvalue()
 
 
