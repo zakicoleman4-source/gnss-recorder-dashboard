@@ -1819,28 +1819,37 @@ def _generate_coverage_gaps(df: pd.DataFrame, out_path: Path) -> None:
     gap_cols = ["station", "gap_start_utc", "gap_end_utc", "gap_hours"]
     empty = pd.DataFrame(columns=gap_cols)
 
-    needed = {"station", "filename_date", "filename_hour"}
-    if df.empty or not needed.issubset(df.columns):
+    # The SQL in export_manifests aliases filename_date -> inferred_date.
+    # Accept either column name so this function works on raw DB rows or the
+    # exported manifest df.
+    date_col = None
+    for candidate in ("filename_date", "inferred_date"):
+        if candidate in df.columns:
+            date_col = candidate
+            break
+    needed = {"station", "filename_hour"}
+    if df.empty or date_col is None or not needed.issubset(df.columns):
         empty.to_csv(out_path, index=False)
         return
 
-    tdf = df[df["filename_date"].notna() & df["filename_hour"].notna()].copy()
+    tdf = df[df[date_col].notna() & df["filename_hour"].notna()].copy()
     if tdf.empty:
         empty.to_csv(out_path, index=False)
         return
 
-    tdf["filename_date"] = tdf["filename_date"].astype(str)
-    tdf["filename_hour"] = tdf["filename_hour"].astype(int)
+    tdf[date_col] = tdf[date_col].astype(str)
+    # Defensive: filename_hour might be float from CSV. Clip [0,23] and cast int.
+    tdf["filename_hour"] = pd.to_numeric(tdf["filename_hour"], errors="coerce").fillna(0).clip(0, 23).astype(int)
 
     covered: set[tuple[str, str, int]] = set(
-        zip(tdf["station"], tdf["filename_date"], tdf["filename_hour"])
+        zip(tdf["station"], tdf[date_col], tdf["filename_hour"])
     )
 
     gap_rows: list[dict] = []
     for station, sdf in tdf.groupby("station"):
         try:
-            min_ts = pd.Timestamp(sdf["filename_date"].min())
-            max_ts = pd.Timestamp(sdf["filename_date"].max())
+            min_ts = pd.Timestamp(sdf[date_col].min())
+            max_ts = pd.Timestamp(sdf[date_col].max())
         except Exception:
             continue
 
@@ -1992,13 +2001,24 @@ def export_manifests(db_path: Path, out_dir: Path) -> Path:
         unique_prefixes = int(df["station"].nunique())
         unique_exts  = int(df["ext"].nunique()) if "ext" in df.columns else 0
 
+    # Constellation counts: split comma-separated `constellations` column,
+    # flatten, count. Empty if column missing or all values empty.
+    by_constellation_counts: dict = {}
+    if not df.empty and "constellations" in df.columns:
+        try:
+            ser = df["constellations"].dropna().astype(str).str.split(",").explode().str.strip()
+            ser = ser[(ser != "") & (ser.str.lower() != "nan")]
+            by_constellation_counts = {str(k): int(v) for k, v in ser.value_counts().to_dict().items()}
+        except Exception:
+            by_constellation_counts = {}
+
     summary = {
         "paths_checked":       int(len(df)),
         "files_in_manifest":   int(len(df)),
         "total_bytes":         total_bytes,
         "unique_prefixes":     unique_prefixes,
         "unique_exts":         unique_exts,
-        "by_constellation_counts": {},
+        "by_constellation_counts": by_constellation_counts,
         "by_ext_counts":       by_ext,
         "by_prefix_counts":    {str(k).lower(): int(v) for k, v in by_station.items()},
         "generated_utc":       _utc_now_iso(),
