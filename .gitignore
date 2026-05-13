@@ -78,3 +78,6 @@ receivers.csv
 
 # ── geonet sample data ────────────────────────────────────────────────────────
 geonet_sample/
+
+# ── Archived unused code (local-only, never pushed) ───────────────────────────
+archive/

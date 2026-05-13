@@ -45,6 +45,7 @@ The **CTR-first mode** checkbox (sidebar) skips the `runpkr00` attempt entirely 
 
 - `dashboard.py` — Streamlit UI (the entry point)
 - `to2_pipeline.py` — scan + probe + convert + manifest export
-- `scan_gnss_folder.py` — standalone CLI scanner (kept for parity with the dashboard's "scan now" path)
+- `probe_t02_files.py` — standalone T02 inventory tool
+- `analyze_station_manifest.py` — per-station manifest analyzer
 - `requirements.txt` — `pandas`, `numpy`, `plotly`, `streamlit`, `requests`
-- `INSTALL.bat` / `RUN_DASHBOARD.bat` — Windows-friendly install + launch
+- `INSTALL.bat` / `RUN_DASHBOARD.bat` / `PROBE_FILES.bat` — Windows-friendly install + launch

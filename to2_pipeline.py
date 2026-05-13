@@ -199,6 +199,22 @@ def _year_from_path(path: Path) -> Optional[int]:
     return None
 
 
+def _doy_to_date(year: int, doy: int):
+    """Convert (year, DOY 1..365/366) to date; reject DOY 366 on non-leap year.
+    Returns None when invalid (prevents silent year-rollover via timedelta).
+    """
+    import datetime as _dt
+    if doy < 1 or doy > 366:
+        return None
+    try:
+        d = _dt.date(year, 1, 1) + _dt.timedelta(days=doy - 1)
+    except (ValueError, OverflowError):
+        return None
+    if d.year != year:
+        return None
+    return d
+
+
 def _parse_filename_dt(name: str, path: Optional[Path] = None) -> tuple[Optional[str], Optional[int]]:
     """Return (iso_date, hour) from Trimble filename, or (None, None).
     Pass path to enable RINEX2 letter-hour format (year extracted from parent dirs).
@@ -217,7 +233,9 @@ def _parse_filename_dt(name: str, path: Optional[Path] = None) -> tuple[Optional
     if m:
         try:
             y, doy, h = int(m.group(1)), int(m.group(2)), int(m.group(3))
-            return (_dt.date(y, 1, 1) + _dt.timedelta(days=doy - 1)).isoformat(), h
+            d = _doy_to_date(y, doy)
+            if d is not None:
+                return d.isoformat(), h
         except (ValueError, OverflowError):
             pass
 
@@ -228,8 +246,10 @@ def _parse_filename_dt(name: str, path: Optional[Path] = None) -> tuple[Optional
             doy = int(m.group(1))
             hour = ord(m.group(2).lower()) - ord('a')
             year = _year_from_path(path) if path else None
-            if year and 0 <= hour <= 23 and 1 <= doy <= 366:
-                return (_dt.date(year, 1, 1) + _dt.timedelta(days=doy - 1)).isoformat(), hour
+            if year and 0 <= hour <= 23:
+                d = _doy_to_date(year, doy)
+                if d is not None:
+                    return d.isoformat(), hour
         except (ValueError, OverflowError):
             pass
 
@@ -316,7 +336,7 @@ def _absorb_text(text: str, result: dict) -> None:
             try:
                 v = int(m.group(1)) / 1000.0
                 if 0.0 < v <= 3600.0:
-                    result["interval_s"] = str(v)
+                    result["interval_s"] = v
             except (ValueError, ZeroDivisionError):
                 pass
     if result["interval_s"] is None:
@@ -325,7 +345,7 @@ def _absorb_text(text: str, result: dict) -> None:
             try:
                 v = float(m.group(1))
                 if 0.0 < v <= 3600.0:
-                    result["interval_s"] = m.group(1).strip()
+                    result["interval_s"] = v
             except ValueError:
                 pass
     if result["marker_name"] is None:
