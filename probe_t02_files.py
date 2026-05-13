@@ -26,7 +26,10 @@ from typing import Optional
 # ---------------------------------------------------------------------------
 # Regex battery — same patterns as to2_pipeline.py probe
 # ---------------------------------------------------------------------------
-_FIELD_END = r"[\x00-\x1f,;\x00]*"
+# Field terminator: REQUIRED at least one control/punct char so non-greedy
+# captures must extend up to a real delimiter (was `*` -- allowed zero, which
+# let non-greedy stop at minimum and truncate names like "AHTI" to "AHT").
+_FIELD_END = r"[\x00-\x1f,;]+"
 
 _RE_START    = re.compile(
     r"(?:SessionStart(?:Utc)?|StartTime|FirstObs|session_start)\s*[=:]\s*"
@@ -82,8 +85,10 @@ def _ecef_to_llh(x: float, y: float, z: float):
 
 
 # Same pattern as to2_pipeline.py STATION_RE — kept in sync deliberately
+# Allows _ inside station code (AB_C) and tolerates _1/_2 duplicate suffixes
+# downstream via the date parser.
 _STATION_RE = re.compile(
-    r"^([A-Za-z0-9]{3,9})(?=(?:19|20)\d{2}|\d{3}[a-xA-X])", re.IGNORECASE
+    r"^([A-Za-z0-9_]{3,9})(?=(?:19|20)\d{2}|\d{3}[a-xA-X])", re.IGNORECASE
 )
 
 _STATION_PREFIX_RE = re.compile(r"^([A-Za-z0-9][A-Za-z0-9_.]{2,3})", re.IGNORECASE)
@@ -91,7 +96,9 @@ _STATION_PREFIX_RE = re.compile(r"^([A-Za-z0-9][A-Za-z0-9_.]{2,3})", re.IGNORECA
 def _station_from_filename(name: str) -> Optional[str]:
     m = _STATION_RE.match(name)
     if m:
-        return m.group(1).upper()
+        code = m.group(1).upper().rstrip("_.")
+        if len(code) >= 3:
+            return code
     # Fallback: first 3-4 chars; strip trailing _ . (separators, not part of code)
     m = _STATION_PREFIX_RE.match(name)
     if m:
@@ -103,8 +110,42 @@ def _station_from_filename(name: str) -> Optional[str]:
 
 # ---------------------------------------------------------------------------
 # Filename date extraction (GeoNet: SSSS_YYYYDDDHHMM_*  or  SSSSYYYYMMDDHHMMSS_*)
+# Also handles RINEX2-style {STATION}{DOY}{hour-letter}[_N].T02 — year derived
+# from parent directory.
 # ---------------------------------------------------------------------------
-def _date_from_filename(stem: str) -> Optional[str]:
+_FN_DT_RINEX2_PROBE = re.compile(
+    r"^[A-Za-z0-9_]{3,9}"
+    r"(00[1-9]|0[1-9]\d|[12]\d{2}|3[0-5]\d|36[0-6])"
+    r"([a-x])"
+    r"(?=[._]|$)",
+    re.IGNORECASE,
+)
+
+
+def _year_from_path(path: Optional[Path]) -> Optional[int]:
+    if path is None:
+        return None
+    for part in reversed(path.parts[:-1]):
+        if re.fullmatch(r"(?:19|20)\d{2}", part):
+            return int(part)
+    return None
+
+
+def _doy_to_date(year: int, doy: int):
+    """Convert (year, DOY 1..365/366) to date. Rejects DOY 366 on non-leap year
+    (prevents silent year-rollover via timedelta)."""
+    if doy < 1 or doy > 366:
+        return None
+    try:
+        d = datetime.date(year, 1, 1) + datetime.timedelta(days=doy - 1)
+    except (ValueError, OverflowError):
+        return None
+    if d.year != year:
+        return None
+    return d
+
+
+def _date_from_filename(stem: str, path: Optional[Path] = None) -> Optional[str]:
     # YYYYMMDD + 2-digit hour anywhere in stem
     m = re.search(r"(20\d{2})(0[1-9]|1[0-2])(0[1-9]|[12]\d|3[01])(\d{2})", stem)
     if m:
@@ -118,9 +159,23 @@ def _date_from_filename(stem: str) -> Optional[str]:
     if m:
         try:
             year, doy, hour = int(m.group(1)), int(m.group(2)), int(m.group(3))
-            if 1 <= doy <= 366 and 0 <= hour <= 23:
-                dt = datetime.datetime(year, 1, 1) + datetime.timedelta(days=doy - 1)
-                return f"{dt.strftime('%Y-%m-%d')}T{hour:02d}:00:00"
+            if 0 <= hour <= 23:
+                d = _doy_to_date(year, doy)
+                if d is not None:
+                    return f"{d.strftime('%Y-%m-%d')}T{hour:02d}:00:00"
+        except (ValueError, OverflowError):
+            pass
+    # RINEX2-style: {STATION}{DOY}{a-x}[_N].T02 — needs year from parent dir
+    m = _FN_DT_RINEX2_PROBE.match(stem)
+    if m:
+        try:
+            doy = int(m.group(1))
+            hour = ord(m.group(2).lower()) - ord('a')
+            year = _year_from_path(path)
+            if year and 0 <= hour <= 23:
+                d = _doy_to_date(year, doy)
+                if d is not None:
+                    return f"{d.strftime('%Y-%m-%d')}T{hour:02d}:00:00"
         except (ValueError, OverflowError):
             pass
     return None
@@ -260,9 +315,10 @@ def probe_file(path: Path) -> dict:
 
     result["bzip2_blocks_found"] = blocks
 
-    # Filename fallback for session_start when header doesn't embed it
+    # Filename fallback for session_start when header doesn't embed it.
+    # Pass full path so RINEX2 letter-hour format can derive year from parent dir.
     if result["session_start"] is None:
-        result["session_start"] = _date_from_filename(path.stem)
+        result["session_start"] = _date_from_filename(path.stem, path)
 
     # Classify format based on receiver model
     rx = (result["receiver_model"] or "").lower()
