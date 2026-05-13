@@ -59,24 +59,19 @@ exit /b 1
 
 :PY_OK
 
-:: ── Create or repair venv ────────────────────────────────────────────────────
-if exist "%VENV%\Scripts\python.exe" (
-  "%VENV%\Scripts\python.exe" -c "import sys" >nul 2>&1
-  if errorlevel 1 (
-    echo [gnss] Existing venv is broken - deleting and recreating...
-    %PYEXE% -c "import shutil; shutil.rmtree(r'%VENV%')" >nul 2>&1
-  )
+:: ── Always delete and recreate venv (guaranteed clean install) ───────────────
+if exist "%VENV%" (
+  echo [gnss] Removing existing environment...
+  %PYEXE% -c "import shutil; shutil.rmtree(r'%VENV%')" >nul 2>&1
 )
-if not exist "%VENV%\Scripts\python.exe" (
-  echo [gnss] Creating virtual environment...
-  %PYEXE% -m venv "%VENV%" >>"%LOG%" 2>&1
-  if errorlevel 1 (
-    echo [gnss] ERROR: venv creation failed. See install.log
-    pause
-    exit /b 1
-  )
+echo [gnss] Creating virtual environment...
+%PYEXE% -m venv "%VENV%" >>"%LOG%" 2>&1
+if errorlevel 1 (
+  echo [gnss] ERROR: venv creation failed. See install.log
+  pause
+  exit /b 1
 )
-echo [gnss] Virtual environment OK.
+echo [gnss] Virtual environment created.
 
 :: ── Pip flags: retries + timeout + trusted-host for corporate proxies ─────────
 set PF=--retries 5 --timeout 60 --trusted-host pypi.org --trusted-host files.pythonhosted.org
