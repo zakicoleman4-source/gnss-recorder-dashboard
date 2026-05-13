@@ -1171,11 +1171,21 @@ def _nonempty_obs(out_dir: Path) -> Optional[Path]:
 
 def _convert_t02_ctr(ctr_exe: Path, inp: Path, out_dir: Path) -> Optional[Path]:
     """
-    Convert T02 → RINEX 3 using IL-patched convertToRinex_cli.exe.
+    Convert T02 → RINEX 3 using convertToRinex_cli.exe (Trimble CLI build).
     Handles RT27/Alloy files that runpkr00+convbin cannot decode.
     Returns obs Path on success. Raises ConverterError on failure.
+
+    Robust output detection: snapshots existing .??o files BEFORE invocation so
+    stale RINEX from a previous T02 in the same out_dir cannot be mis-attributed.
     """
     out_dir.mkdir(parents=True, exist_ok=True)
+    # Snapshot pre-existing obs files (multiple T02s share station out_dir)
+    try:
+        pre_existing: set = {p.resolve() for p in out_dir.glob("*.??o")}
+    except OSError:
+        pre_existing = set()
+    start_time = time.time() - 1.0  # 1s slack for filesystem clock skew
+
     try:
         r = subprocess.run(
             [str(ctr_exe), str(inp), "-p", str(out_dir), "-v", "3.04"],
@@ -1189,22 +1199,48 @@ def _convert_t02_ctr(ctr_exe: Path, inp: Path, out_dir: Path) -> Optional[Path]:
     combined = (r.stdout or "") + (r.stderr or "")
     if "aborted" in combined.lower():
         raise ConverterError(f"convertToRinex aborted: {combined[:200].strip()}")
+
     import glob as _glob
     stem_pat = _glob.escape(inp.stem)
-    def _safe_size(p: Path) -> bool:
+
+    def _fresh_and_nonempty(p: Path) -> bool:
+        try:
+            st = p.stat()
+            return st.st_size > 0 and st.st_mtime >= start_time
+        except OSError:
+            return False
+
+    def _nonempty(p: Path) -> bool:
         try:
             return p.stat().st_size > 0
         except OSError:
             return False
-    matches = [p for p in out_dir.glob(f"{stem_pat}.??o") if _safe_size(p)]
-    if not matches:
-        matches = [p for p in out_dir.glob("*.??o") if _safe_size(p)]
-    if not matches:
-        raise ConverterError(
-            f"convertToRinex produced no obs "
-            f"({combined[:120].strip() or f'exit={r.returncode}'})"
-        )
-    return matches[0]
+
+    # 1. Stem-matched file, freshly written by this invocation (most specific)
+    matches = [p for p in out_dir.glob(f"{stem_pat}.??o") if _fresh_and_nonempty(p)]
+    if matches:
+        return matches[0]
+
+    # 2. Stem-matched file from any time (CTR may not bump mtime on re-conversion)
+    matches = [p for p in out_dir.glob(f"{stem_pat}.??o") if _nonempty(p)]
+    if matches:
+        return matches[0]
+
+    # 3. Any NEW obs file written during this invocation that didn't exist before
+    new_files = [
+        p for p in out_dir.glob("*.??o")
+        if _fresh_and_nonempty(p) and p.resolve() not in pre_existing
+    ]
+    if new_files:
+        try:
+            return max(new_files, key=lambda x: x.stat().st_mtime)
+        except OSError:
+            return new_files[0]
+
+    raise ConverterError(
+        f"convertToRinex produced no obs "
+        f"({combined[:120].strip() or f'exit={r.returncode}'})"
+    )
 
 
 def convert_to_rinex(cfg: PipelineConfig, inp: Path, out_dir: Path) -> Optional[Path]:
@@ -1424,7 +1460,7 @@ def run_pipeline(cfg: PipelineConfig, progress_cb=None) -> Path:
                     )
 
                     if (is_rt27_receiver or cfg.ctr_first) and has_ctr:
-                        # RT27/Alloy file + patched converter available
+                        # RT27/Alloy + CTR converter available
                         # ctr_first=True also routes here: skips runpkr00+convbin entirely
                         try:
                             rinex_obs = _convert_t02_ctr(cfg.ctr_path, p, out_dir)
@@ -1435,6 +1471,24 @@ def run_pipeline(cfg: PipelineConfig, progress_cb=None) -> Path:
                             rinex_obs      = None
                             convert_status = "failed"
                             convert_detail = str(ce)
+                            # Fallback to runpkr00+convbin when ctr_first picked CTR for an
+                            # untagged file (might be RT17, not RT27). Skip fallback when
+                            # the file was tagged RT27 -- runpkr00 cannot decode RT27.
+                            if (
+                                cfg.ctr_first and not is_rt27_receiver
+                                and cfg.runpkr00_path and cfg.runpkr00_path.exists()
+                                and has_convbin_cfg(cfg)
+                            ):
+                                try:
+                                    rinex_obs = convert_to_rinex(cfg, p, out_dir)
+                                except ConverterError as ce2:
+                                    convert_detail = f"CTR: {ce}; runpkr00+convbin: {ce2}"
+                                else:
+                                    if rinex_obs:
+                                        convert_status = "ok"
+                                        convert_detail = f"CTR failed ({ce}); runpkr00+convbin succeeded"
+                                    else:
+                                        convert_detail = f"CTR: {ce}; runpkr00+convbin: no output"
                     elif has_converter and is_rt27_receiver:
                         # Early-skip: RT27 with no CTR — runpkr00+convbin can't decode
                         convert_status = "unsupported_rt27"
@@ -1519,12 +1573,14 @@ def run_pipeline(cfg: PipelineConfig, progress_cb=None) -> Path:
                                         lat, lon, h_m = _ecef_to_llh_wgs84(*xyz)
                                     except ZeroDivisionError:
                                         lat = lon = h_m = None
-                            if "INTERVAL" in ln and interval_s is None:
+                            # Use column-60+ label region to avoid matching comment text
+                            label = ln[60:].strip() if len(ln) > 60 else ""
+                            if label == "INTERVAL" and interval_s is None:
                                 try:
                                     interval_s = _snap_interval(float(ln[:60].strip()))
                                 except (ValueError, TypeError):
                                     pass
-                            if "MARKER NAME" in ln:
+                            if label == "MARKER NAME":
                                 raw = ln[:60].strip()
                                 if raw:
                                     clean = re.sub(r"[^A-Z0-9_.]", "", raw.upper())[:8]

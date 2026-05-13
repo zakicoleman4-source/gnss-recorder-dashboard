@@ -295,12 +295,21 @@ def main() -> None:
 
     print(f"Scanning {root} ...")
     extensions = {".t02", ".t04", ".to2", ".to4"}
-    files = [p for p in root.rglob("*") if p.suffix.lower() in extensions]
+    files: list = []
+    limit = args.limit if args.limit > 0 else 0
+    # Tolerant walk: skips dirs with permission errors instead of aborting
+    for dirpath, _dirnames, filenames in os.walk(root, onerror=lambda _e: None, followlinks=False):
+        for fn in filenames:
+            if Path(fn).suffix.lower() in extensions:
+                files.append(Path(dirpath) / fn)
+                if limit and len(files) >= limit:
+                    break
+        if limit and len(files) >= limit:
+            break
     print(f"Found {len(files):,} files")
 
-    if args.limit > 0:
-        files = files[: args.limit]
-        print(f"Limiting to first {args.limit}")
+    if limit:
+        print(f"Limited to first {limit}")
 
     if not files:
         sys.exit("No T02/T04 files found.")
@@ -312,7 +321,12 @@ def main() -> None:
     with ProcessPoolExecutor(max_workers=args.workers) as pool:
         futures = {pool.submit(probe_file, f): f for f in files}
         for fut in as_completed(futures):
-            results.append(fut.result())
+            try:
+                results.append(fut.result())
+            except Exception as e:
+                # Don't let one bad file abort the whole probe
+                f = futures[fut]
+                results.append({"path": str(f), "filename": f.name, "error": f"worker_exception: {e}"})
             done += 1
             if done % 500 == 0 or done == len(files):
                 pct = done / len(files) * 100

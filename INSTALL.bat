@@ -74,7 +74,7 @@ if errorlevel 1 (
 echo [gnss] Virtual environment created.
 
 :: ── Pip flags: retries + timeout + trusted-host for corporate proxies ─────────
-set PF=--retries 5 --timeout 60 --trusted-host pypi.org --trusted-host files.pythonhosted.org
+set PF=--retries 5 --timeout 60 --no-cache-dir --trusted-host pypi.org --trusted-host files.pythonhosted.org
 
 :: ── Upgrade pip ──────────────────────────────────────────────────────────────
 echo [gnss] Upgrading pip...
