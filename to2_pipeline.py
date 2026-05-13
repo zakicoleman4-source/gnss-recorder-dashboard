@@ -1639,15 +1639,39 @@ def run_pipeline(cfg: PipelineConfig, progress_cb=None) -> Path:
                             lat, lon, h_m = station_coords[station]
                             _patch_rinex_approx_pos(rinex_obs, lat, lon, h_m)
 
-                        # ── SPP solve (one attempt per station per run) ────────
+                        # ── SPP solve: one attempt per station per run ─────────
+                        # CTR writes nav as .{yy}n/.{yy}g/etc; runpkr00+convbin writes
+                        # .nav. Try .nav first, then any .??n/.??g/etc. alongside obs.
+                        # Mark station "done" once SPP has been attempted (success OR
+                        # ran-but-failed) to avoid retrying on every file in that
+                        # station's batch -- but DO retry if nav file was missing
+                        # entirely (next file may have nav).
                         if (
                             lat is None
                             and station not in station_spp_done
                             and cfg.rnx2rtkp_path and cfg.rnx2rtkp_path.exists()
                         ):
-                            station_spp_done.add(station)
                             nav_path = rinex_obs.with_suffix(".nav")
-                            if nav_path.exists() and nav_path.stat().st_size > 0:
+                            if not (nav_path.exists() and nav_path.stat().st_size > 0):
+                                # Search for CTR-style nav files matching obs stem
+                                stem = rinex_obs.stem
+                                nav_path = None
+                                try:
+                                    for ext_pat in (".??n", ".??g", ".??l", ".??q", ".??c"):
+                                        for cand in rinex_obs.parent.glob(f"{stem}{ext_pat}"):
+                                            try:
+                                                if cand.stat().st_size > 0:
+                                                    nav_path = cand
+                                                    break
+                                            except OSError:
+                                                continue
+                                        if nav_path is not None:
+                                            break
+                                except OSError:
+                                    pass
+                            if nav_path is not None and nav_path.exists() and nav_path.stat().st_size > 0:
+                                # Run SPP; mark done regardless of result (success or fail)
+                                station_spp_done.add(station)
                                 spp = _rnx2rtkp_spp(cfg.rnx2rtkp_path, rinex_obs, nav_path)
                                 if spp is not None:
                                     lat, lon, h_m = spp
