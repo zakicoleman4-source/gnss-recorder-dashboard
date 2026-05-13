@@ -203,7 +203,14 @@ def recording_intervals_utc(sub: "pd.DataFrame", session_hours: float) -> list[t
         if t0 is not None and t1 is not None:
             start, end = t0, t1
         else:
-            start = pd.Timestamp(ev.loc[idx]).tz_convert("UTC") if ev.loc[idx].tzinfo else ev.loc[idx].tz_localize("UTC")
+            ev_val = ev.loc[idx]
+            if pd.isna(ev_val):
+                # Skip rows with no inferable timestamp -- can't place them on a timeline
+                continue
+            try:
+                start = pd.Timestamp(ev_val).tz_convert("UTC") if ev_val.tzinfo else ev_val.tz_localize("UTC")
+            except (AttributeError, TypeError):
+                continue
             end = start + td_sess
         if end <= start:
             end = start + td_sess
@@ -251,8 +258,12 @@ def gaps_in_window(
     """
     import pandas as pd
 
-    win_start = pd.Timestamp(win_start).tz_convert("UTC")
-    win_end = pd.Timestamp(win_end).tz_convert("UTC")
+    def _to_utc(x):
+        x = pd.Timestamp(x)
+        return x.tz_localize("UTC") if x.tzinfo is None else x.tz_convert("UTC")
+
+    win_start = _to_utc(win_start)
+    win_end = _to_utc(win_end)
     if win_end <= win_start:
         return []
     if not merged:
@@ -261,8 +272,8 @@ def gaps_in_window(
     gaps: list[tuple[pd.Timestamp, pd.Timestamp]] = []
     cur = win_start
     for s, e in sorted(merged, key=lambda x: x[0]):
-        s = pd.Timestamp(s).tz_convert("UTC")
-        e = pd.Timestamp(e).tz_convert("UTC")
+        s = _to_utc(s)
+        e = _to_utc(e)
         s = max(s, win_start)
         e = min(e, win_end)
         if e <= win_start or s >= win_end:
@@ -438,8 +449,11 @@ def slot_status_line(
     import pandas as pd
 
     ss, se = slot_utc
-    se = pd.Timestamp(se).tz_convert("UTC")
-    ss = pd.Timestamp(ss).tz_convert("UTC")
+    def _utc(x):
+        x = pd.Timestamp(x)
+        return x.tz_localize("UTC") if x.tzinfo is None else x.tz_convert("UTC")
+    se = _utc(se)
+    ss = _utc(ss)
     cov = overlap_seconds(merged, ss, se)
     total = max(0.0, (se - ss).total_seconds())
     if total <= 0:
@@ -457,7 +471,11 @@ def slot_status_line(
 def utc_monday_start(ts: "pd.Timestamp") -> "pd.Timestamp":
     import pandas as pd
 
-    t = pd.Timestamp(ts).tz_convert("UTC")
+    t = pd.Timestamp(ts)
+    if t.tzinfo is None:
+        t = t.tz_localize("UTC")
+    else:
+        t = t.tz_convert("UTC")
     day = t.normalize()
     dow = int(day.dayofweek)  # Monday=0
     monday = day - pd.Timedelta(days=dow)
@@ -571,7 +589,11 @@ def hour_coverage_grid_utc(
     """
     import pandas as pd
 
-    ws = pd.Timestamp(week_start_utc).tz_convert("UTC")
+    ws = pd.Timestamp(week_start_utc)
+    if ws.tzinfo is None:
+        ws = ws.tz_localize("UTC")
+    else:
+        ws = ws.tz_convert("UTC")
     grid: list[list[int]] = []
     for d in range(7):
         row = []
@@ -599,7 +621,11 @@ def week_local_span_label(week_start_utc: "pd.Timestamp", tz_name: str) -> str:
 
     z = _get_zoneinfo(tz_name) or _get_zoneinfo("UTC")
     assert z is not None
-    ws = pd.Timestamp(week_start_utc).tz_convert("UTC")
+    ws = pd.Timestamp(week_start_utc)
+    if ws.tzinfo is None:
+        ws = ws.tz_localize("UTC")
+    else:
+        ws = ws.tz_convert("UTC")
     we = ws + pd.Timedelta(days=7) - pd.Timedelta(seconds=1)
     a = ws.tz_convert(z)
     b = we.tz_convert(z)

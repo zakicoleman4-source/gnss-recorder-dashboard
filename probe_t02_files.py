@@ -69,18 +69,34 @@ _PROBE_MAX_BYTES = 1024 * 1024  # 1 MB — covers all metadata blocks
 # Coordinate helpers
 # ---------------------------------------------------------------------------
 def _ecef_to_llh(x: float, y: float, z: float):
-    """Approximate WGS-84 ECEF -> lat/lon/h. Good to ~1 m."""
+    """Approximate WGS-84 ECEF -> lat/lon/h. Good to ~1 m.
+    Returns None for degenerate inputs (NaN/inf, origin, off-Earth radius).
+    """
     import math
+    if not all(map(math.isfinite, (x, y, z))):
+        return None
+    if x == 0.0 and y == 0.0 and z == 0.0:
+        return None
+    r = math.sqrt(x * x + y * y + z * z)
+    if r < 5_000_000.0 or r > 8_000_000.0:
+        return None  # not a plausible point on/near Earth surface
     a = 6378137.0
     e2 = 6.69437999014e-3
     lon = math.atan2(y, x)
     p = math.sqrt(x * x + y * y)
+    if p < 1.0:
+        return (90.0 if z >= 0 else -90.0), math.degrees(lon), abs(z) - a * math.sqrt(1.0 - e2)
     lat = math.atan2(z, p * (1 - e2))
     for _ in range(5):
         N = a / math.sqrt(1 - e2 * math.sin(lat) ** 2)
         lat = math.atan2(z + e2 * N * math.sin(lat), p)
     N = a / math.sqrt(1 - e2 * math.sin(lat) ** 2)
-    h = p / math.cos(lat) - N if abs(math.cos(lat)) > 1e-10 else abs(z) / math.sin(lat) - N * (1 - e2)
+    cos_lat = math.cos(lat)
+    sin_lat = math.sin(lat)
+    if abs(cos_lat) >= abs(sin_lat):
+        h = p / cos_lat - N
+    else:
+        h = z / sin_lat - N * (1 - e2)
     return math.degrees(lat), math.degrees(lon), h
 
 
@@ -237,7 +253,9 @@ def probe_file(path: Path) -> dict:
             m = _RE_INTERVAL_MS.search(text)
             if m:
                 try:
-                    result["interval_s"] = int(m.group(1)) / 1000.0
+                    v = int(m.group(1)) / 1000.0
+                    if 0 < v < 3600:  # reject garbage like 99999s "intervals"
+                        result["interval_s"] = v
                 except ValueError:
                     pass
         if result["interval_s"] is None:
@@ -268,16 +286,18 @@ def probe_file(path: Path) -> dict:
             m = _RE_ECEF.search(text)
             if m:
                 try:
-                    la, lo, h = _ecef_to_llh(float(m.group(1)), float(m.group(2)), float(m.group(3)))
-                    result["lat"], result["lon"], result["height_m"] = la, lo, h
+                    out = _ecef_to_llh(float(m.group(1)), float(m.group(2)), float(m.group(3)))
+                    if out is not None:
+                        result["lat"], result["lon"], result["height_m"] = out
                 except Exception:
                     pass
         if result["lat"] is None:
             m = _RE_RINEX_XYZ.search(text)
             if m:
                 try:
-                    la, lo, h = _ecef_to_llh(float(m.group(1)), float(m.group(2)), float(m.group(3)))
-                    result["lat"], result["lon"], result["height_m"] = la, lo, h
+                    out = _ecef_to_llh(float(m.group(1)), float(m.group(2)), float(m.group(3)))
+                    if out is not None:
+                        result["lat"], result["lon"], result["height_m"] = out
                 except Exception:
                     pass
         if result["receiver_model"] is None:
