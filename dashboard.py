@@ -1029,8 +1029,13 @@ with st.sidebar:
             else:
                 tmp = Path(tempfile.mkdtemp(prefix="gnss_manifests_upload_"))
                 zpath = tmp / "upload.zip"
-                # Defend against an oversize upload (Streamlit allows up to 200MB by
-                # default, but a malicious user could still try a zip-bomb).
+                # Defend against an oversize upload before loading bytes into RAM.
+                # Streamlit's UploadedFile exposes .size cheaply; only call
+                # .getvalue() after the size check passes.
+                up_size = int(getattr(up, "size", 0) or 0)
+                if up_size > _MAX_DOWNLOAD_BYTES:
+                    st.error(f"Uploaded zip is {up_size:,} bytes (cap is {_MAX_DOWNLOAD_BYTES:,}).")
+                    st.stop()
                 upload_bytes = up.getvalue()
                 if len(upload_bytes) > _MAX_DOWNLOAD_BYTES:
                     st.error(f"Uploaded zip is {len(upload_bytes):,} bytes (cap is {_MAX_DOWNLOAD_BYTES:,}).")
